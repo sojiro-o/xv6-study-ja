@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""Count sentences, characters, estimated duration, and dictionary coverage for script.md."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+from dataclasses import dataclass, field
+from pathlib import Path
+import re
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_SCRIPT = REPO_ROOT / "video" / "ep01" / "script.md"
+
+VISUAL_CUE_RE = re.compile(r"\s*\[画面:\s*([^\]]+)\]\s*$")
+ASCII_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+PUNCT_RE = re.compile(r"[、。！？!?「」『』（）()・…―〜\s]")
+
+FORBIDDEN_AUDIO_PHRASES = (
+    "この図",
+    "上の図",
+    "下の図",
+    "左の図",
+    "右の図",
+    "上のコード",
+    "下のコード",
+    "こちらのコード",
+    "このコード",
+    "画面の通り",
+    "画面のとおり",
+    "ご覧の",
+    "見てわかる通り",
+    "赤枠",
+)
+
+
+@dataclass
+class SpokenLine:
+    lineno: int
+    spoken: str
+    visual: str | None
+
+
+@dataclass
+class SectionStats:
+    title: str
+    lines: list[SpokenLine] = field(default_factory=list)
+
+    @property
+    def chars(self) -> int:
+        return sum(len( re.sub(r"\s+", "", ln.spoken) ) for ln in self.lines)
+
+
+def fmt_mmss(chars: int, cpm: float) -> str:
+    total_sec = round((chars / cpm) * 60)
+    mm, ss = divmod(total_sec, 60)
+    return f"{mm}分{ss:02d}秒"
+
+
+def parse_script(path: Path) -> tuple[dict[str, str], list[SectionStats], list[str]]:
+    raw_lines = path.read_text(encoding="utf-8").splitlines()
+    meta: dict[str, str] = {}
+    sections: list[SectionStats] = []
+    warnings: list[str] = []
+
+    idx = 0
+    # Parse YAML-like frontmatter at top of file
+    if raw_lines and raw_lines[0].strip() == "---":
+        idx = 1
+        while idx < len(raw_lines) and raw_lines[idx].strip() != "---":
+            line = raw_lines[idx].strip()
+            if line and not line.startswith("#") and ":" in line:
+                k, v = line.split(":", 1)
+                meta[k.strip()] = v.strip().strip('"').strip("'")
+            idx += 1
+        if idx < len(raw_lines) and raw_lines[idx].strip() == "---":
+            idx += 1
+        else:
+            warnings.append("先頭メタ情報の終端 '---' が見つかりません。")
+
+    in_comment = False
+    current_section = SectionStats(title="(見出し前)")
+
+    for lineno in range(idx + 1, len(raw_lines) + 1):
+        raw = raw_lines[lineno - 1]
+        stripped = raw.strip()
+
+        if in_comment:
+            if "-->" in stripped:
+                in_comment = False
+            continue
+        if stripped.startswith("<!--"):
+            if "-->" not in stripped:
+                in_comment = True
+            continue
+        if not stripped or stripped.startswith(">"):
+            continue
+        if stripped == "---":
+            continue
+        if stripped.startswith("#"):
+            heading = stripped.lstrip("#").strip()
+            if current_section.lines:
+                sections.append(current_section)
+            current_section = SectionStats(title=heading)
+            continue
+
+        m = VISUAL_CUE_RE.search(raw)
+        if m:
+            visual = m.group(1).strip()
+            spoken = raw[: m.start()].strip()
+        else:
+            visual = None
+            spoken = stripped
+
+        if "[" in spoken or "]" in spoken:
+            warnings.append(f"{lineno}行目: 発話本文に角括弧が残っています: {spoken}")
+
+        # Check 1-line = 1-sentence rule (outside 「...」 quotes)
+        unquoted = re.sub(r"「[^」]*」", "", spoken)
+        sent_endings = re.findall(r"[。！？!?]", unquoted[:-1] if unquoted else "")
+        if sent_endings:
+            warnings.append(f"{lineno}行目: 1行に複数の文末記号が含まれています: {spoken}")
+
+        for phrase in FORBIDDEN_AUDIO_PHRASES:
+            if phrase in spoken:
+                warnings.append(f"{lineno}行目: 画面依存の表現 '{phrase}' が含まれています: {spoken}")
+
+        current_section.lines.append(SpokenLine(lineno=lineno, spoken=spoken, visual=visual))
+
+    if current_section.lines:
+        sections.append(current_section)
+
+    return meta, sections, warnings
+
+
+def check_dictionary(sections: list[SectionStats], dict_path: Path) -> tuple[set[str], set[str], list[str]]:
+    entries: dict[str, str] = {}
+    dict_warnings: list[str] = []
+    with dict_path.open(encoding="utf-8", newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        if not header or len(header) < 2:
+            dict_warnings.append("dictionary.csv のヘッダーが不正です。")
+        for row_no, row in enumerate(reader, start=2):
+            if not row or not any(cell.strip() for cell in row):
+                continue
+            if len(row) < 3:
+                dict_warnings.append(f"dictionary.csv {row_no}行目: 列数が3未満です。")
+                continue
+            surface, reading = row[0].strip(), row[1].strip()
+            entries[surface] = reading
+            if not re.fullmatch(r"[ァ-ヴー・]+", reading):
+                dict_warnings.append(
+                    f"dictionary.csv {row_no}行目: 読み '{reading}' にカタカナ以外の文字が含まれています。"
+                )
+
+    used_tokens: set[str] = set()
+    for sec in sections:
+        for ln in sec.lines:
+            for tok in ASCII_TOKEN_RE.findall(ln.spoken):
+                used_tokens.add(tok)
+
+    missing = {tok for tok in used_tokens if tok not in entries}
+    return used_tokens, missing, dict_warnings
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="scripts/script-stats",
+        description="台本（script.md）の文数・文字数・推定尺・辞書カバー率を集計します。",
+    )
+    parser.add_argument(
+        "script",
+        nargs="?",
+        default=str(DEFAULT_SCRIPT),
+        help="集計対象の script.md パス（既定: video/ep01/script.md）",
+    )
+    parser.add_argument(
+        "--dict",
+        dest="dict_path",
+        default=None,
+        help="照合する dictionary.csv パス（省略時は script と同じディレクトリの dictionary.csv）",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="文字数範囲（2,600〜3,800字）・1行1文・画面依存表現・辞書未登録を厳格検証し、違反時に終了コード1を返します。",
+    )
+    args = parser.parse_args()
+
+    script_path = Path(args.script)
+    if not script_path.is_file():
+        print(f"[FAIL] 台本ファイルが見つかりません: {script_path}", file=sys.stderr)
+        return 1
+
+    meta, sections, warnings = parse_script(script_path)
+    all_lines = [ln for sec in sections for ln in sec.lines]
+    if not all_lines:
+        print(f"[FAIL] 発話行が1行も見つかりません: {script_path}", file=sys.stderr)
+        return 1
+
+    total_chars = sum(len(re.sub(r"\s+", "", ln.spoken)) for ln in all_lines)
+    plain_chars = sum(len(PUNCT_RE.sub("", ln.spoken)) for ln in all_lines)
+    visual_count = sum(1 for ln in all_lines if ln.visual is not None)
+    lengths = [len(re.sub(r"\s+", "", ln.spoken)) for ln in all_lines]
+
+    print(f"=== 台本統計: {script_path} ===")
+    if meta:
+        print(f"タイトル     : {meta.get('title', '(未設定)')}")
+        print(f"話者名（仮） : {meta.get('character', '(未設定)')}")
+        print(f"対象コミット : {meta.get('target_commit', '(未設定)')}")
+        print(f"参照章       : {meta.get('reference_chapter', '(未設定)')}")
+    print(f"セクション数 : {len(sections)}")
+    print(f"文数（字幕数）: {len(all_lines)} 文（うち画面指示付き {visual_count} 文）")
+    print(f"本文文字数   : {total_chars:,} 字（空白除く・句読点込み） / {plain_chars:,} 字（句読点・括弧除く）")
+    print(
+        f"1文あたり長  : 平均 {total_chars / len(all_lines):.1f} 字 "
+        f"（最短 {min(lengths)} 字 / 最長 {max(lengths)} 字）"
+    )
+    print(
+        "推定尺       : "
+        f"300字/分 = {fmt_mmss(total_chars, 300)} | "
+        f"315字/分 = {fmt_mmss(total_chars, 315)} | "
+        f"330字/分 = {fmt_mmss(total_chars, 330)}"
+    )
+    print()
+    print("--- セクション別内訳（目安尺は 315 字/分換算） ---")
+    for sec in sections:
+        c = sec.chars
+        print(f"  {sec.title}: {len(sec.lines):2d} 文 / {c:4d} 字 / 約 {fmt_mmss(c, 315)}")
+
+    dict_path = Path(args.dict_path) if args.dict_path else script_path.parent / "dictionary.csv"
+    missing_tokens: set[str] = set()
+    if dict_path.is_file():
+        used_tokens, missing_tokens, dict_warnings = check_dictionary(sections, dict_path)
+        warnings.extend(dict_warnings)
+        print()
+        if missing_tokens:
+            print(
+                f"--- 辞書照合 ({dict_path.name}): 未登録トークンあり {sorted(missing_tokens)} ---"
+            )
+        else:
+            print(
+                f"--- 辞書照合 ({dict_path.name}): OK（本文中の英字トークン {len(used_tokens)} 種すべて登録済み） ---"
+            )
+
+    # Check character name count if defined in metadata
+    char_name = meta.get("character", "")
+    if char_name:
+        full_text = script_path.read_text(encoding="utf-8")
+        occurrences = full_text.count(char_name)
+        if occurrences != 1:
+            warnings.append(
+                f"話者名 '{char_name}' の出現回数が {occurrences} 回です（メタ情報の1か所のみが推奨）。"
+            )
+
+    if not (2600 <= total_chars <= 3800):
+        warnings.append(f"本文文字数 {total_chars} 字が目標範囲（2,600〜3,800字）の外にあります。")
+
+    if warnings:
+        print()
+        print("--- 検証メッセージ ---")
+        for w in warnings:
+            print(f"  [WARN] {w}")
+
+    if args.check and (warnings or missing_tokens):
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

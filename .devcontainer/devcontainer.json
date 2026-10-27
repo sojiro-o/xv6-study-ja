@@ -1,0 +1,20 @@
+{
+  "name": "xv6 RISC-V",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+  "init": true,
+  "postCreateCommand": "chmod +x scripts/run scripts/clean scripts/debug scripts/test scripts/exp scripts/check-refs scripts/check-lab",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-vscode.cpptools"],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "files.eol": "\n"
+      }
+    }
+  }
+}

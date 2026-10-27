@@ -1,0 +1,42 @@
+site_name: xv6-riscv 日本語教材・実験環境
+site_description: RISC-V 版 xv6 のソースコードと対応させながら OS の仕組みを学ぶ日本語教材
+docs_dir: docs
+site_dir: site
+exclude_docs: |
+  requirements.txt
+  xv6refs.lock
+
+theme:
+  name: material
+  language: ja
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.top
+
+markdown_extensions:
+  - admonition
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+hooks:
+  - scripts/mkdocs_xv6refs.py
+
+nav:
+  - トップ: index.md
+  - 環境ガイド: env.md
+  - 教材:
+      - "第1章 アプリからOSに処理を頼む：システムコール": ch01-syscall.md

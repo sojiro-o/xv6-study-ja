@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$root/xv6-riscv"
+case ${1-} in
+  -h|--help)
+    echo '端末1: scripts/debug [make の引数]  例: scripts/debug GDBPORT=26001'
+    echo '端末2: scripts/debug connect [gdb の引数]'
+    echo 'GDB: break main → continue / 終了: detach → quit'
+    echo 'QEMU の終了: 端末1で Ctrl-a を押してから x'
+    exit 0
+    ;;
+  connect)
+    shift
+    if [[ ! -f .gdbinit || ! -f kernel/kernel ]]; then
+      echo '先に別端末で scripts/debug を起動してください。' >&2
+      exit 1
+    fi
+    exec gdb-multiarch -nx -x .gdbinit "$@"
+    ;;
+esac
+# GDBPORT を変更した場合も接続先を再生成する。
+make -B .gdbinit "$@"
+echo '別端末で scripts/debug connect を実行してください。' >&2
+exec make qemu-gdb "$@"

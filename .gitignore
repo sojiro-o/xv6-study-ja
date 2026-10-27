@@ -1,0 +1,23 @@
+# xv6 のビルド生成物（取り込んだ .gitignore と同じ対象）
+/xv6-riscv/**/*.o
+/xv6-riscv/**/*.d
+/xv6-riscv/**/*.asm
+/xv6-riscv/**/*.sym
+/xv6-riscv/*.img
+/xv6-riscv/kernel/kernel
+/xv6-riscv/mkfs/mkfs
+/xv6-riscv/user/_*
+/xv6-riscv/user/usys.S
+/xv6-riscv/.gdbinit
+/xv6-riscv/TAGS
+/xv6-riscv/test-xv6.out
+
+# 実行ログ・サイト生成物・ローカル仮想環境は作業ツリーに残し、Git 管理外とする。
+/logs/
+/site/
+/.venv/
+__pycache__/
+*.pyc
+*~
+.DS_Store
+Thumbs.db

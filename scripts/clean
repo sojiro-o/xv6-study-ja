@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+if [[ ${1-} == --help || ${1-} == -h ]]; then
+  echo '使い方: scripts/clean [make の引数]'
+  echo 'ビルド生成物と fs.img（xv6 内で作成したファイルを含む）を削除します。'
+  exit 0
+fi
+exec make -C "$root/xv6-riscv" clean "$@"

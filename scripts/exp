@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$root"
+usage() {
+  echo '使い方: scripts/exp <名前>  # exp/<名前> を作成、または既存ブランチに移動'
+  echo '        scripts/exp back    # 開始時のブランチに戻る（変更の破棄はしません）'
+}
+fail() { echo "$*" >&2; exit 1; }
+if [[ ${1-} == -h || ${1-} == --help ]]; then usage; exit 0; fi
+[[ $# == 1 ]] || { usage >&2; exit 1; }
+git rev-parse --verify HEAD >/dev/null 2>&1 ||
+  fail 'まだコミットがありません。環境一式を確認し、初回コミットを作成した後に使ってください。'
+current=$(git symbolic-ref --quiet --short HEAD) ||
+  fail 'ブランチ上で実行してください（detached HEAD では使えません）。'
+[[ -z $(git status --porcelain --untracked-files=normal) ]] ||
+  fail '未保存の変更があります。commit または stash（未追跡ファイルは -u）で退避してから実行してください。'
+if [[ $1 == back ]]; then
+  [[ $current == exp/* ]] || fail '現在は exp/ ブランチではありません。'
+  base=$(git config --local --get xv6.experimentBase) ||
+    fail '戻り先が未登録です。git switch <元のブランチ> で戻ってください。'
+  git show-ref --verify --quiet "refs/heads/$base" || fail "戻り先 $base がありません。"
+  git switch "$base"
+  git config --local --unset xv6.experimentBase
+else
+  [[ $current != exp/* ]] || fail '先に scripts/exp back で元のブランチに戻ってください。'
+  target="exp/$1"
+  git check-ref-format --branch "$target" >/dev/null 2>&1 || fail '実験名が不正です。'
+  if git show-ref --verify --quiet "refs/heads/$target"; then
+    git switch "$target"
+  else
+    git switch -c "$target"
+  fi
+  git config --local xv6.experimentBase "$current"
+fi

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+if [[ ${1-} == --help || ${1-} == -h ]]; then
+  echo '使い方: scripts/run [make の引数]  例: scripts/run CPUS=1'
+  echo '終了: Ctrl-a を押してから x'
+  exit 0
+fi
+exec make -C "$root/xv6-riscv" qemu "$@"

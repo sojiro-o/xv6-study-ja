@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Verify or update xv6ref code excerpts and docs/xv6refs.lock."""
+
+import argparse
+from pathlib import Path
+import sys
+
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import xv6refs  # noqa: E402
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="scripts/check-refs",
+        description="docs/ 内の <!-- xv6ref: path#symbol --> 参照を解決し、docs/xv6refs.lock と照合します。",
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="全参照を解決して docs/xv6refs.lock を更新します。",
+    )
+    args = parser.parse_args()
+
+    if args.update:
+        lock_data, errors = xv6refs.build_lock_data()
+        if errors:
+            for err in errors:
+                print(f"[FAIL] {err}", file=sys.stderr)
+            return 1
+        xv6refs.write_lock_file(lock_data)
+        count = len(lock_data["references"])
+        print(
+            f"[OK] Updated docs/xv6refs.lock ({count} reference(s), commit {lock_data['commit'][:12]})"
+        )
+        return 0
+
+    count, errors = xv6refs.verify_against_lock()
+    if errors:
+        for err in errors:
+            print(f"[FAIL] {err}", file=sys.stderr)
+        return 1
+
+    print(f"[OK] All {count} xv6ref reference(s) match docs/xv6refs.lock")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

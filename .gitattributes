@@ -1,0 +1,2 @@
+# Windows の checkout でもシェルスクリプトと xv6 ソースを LF に揃える。
+* text=auto eol=lf
