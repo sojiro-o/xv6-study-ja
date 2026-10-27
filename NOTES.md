@@ -17,13 +17,13 @@
 
 ---
 
-## 2. 第1章（システムコール）教材・参照自動解決・MkDocs 構築フェーズ
+## 2. システムコール教材（現・第4章）・参照自動解決・MkDocs 構築フェーズ
 
 ### 今回作成・変更したファイル
 
 - **新規作成**
   - `docs/index.md` — 教材サイトのトップページ（使い方・AI 学習モード案内・章一覧）
-  - `docs/ch01-syscall.md` — 第1章「アプリからOSに処理を頼む：システムコール」（8節構成、補足ボックス、`xv6ref` 自動抜粋、実測ログ、折りたたみ確認問題4問）
+  - `docs/ch04-syscall.md`（初出時は旧第1章として作成、のちフェーズ5で MIT 教科書第4章に合わせ改名） — 「第4章 トラップとシステムコール（1）アプリからOSに処理を頼む」（`xv6ref` 自動抜粋、実測ログ、折りたたみ確認問題4問）
   - `docs/labs/syscall-trace.patch` — `echo` プロセスのシステムコール名と戻り値を表示する改造パッチ（`xv6-riscv/kernel/syscall.c` 対象）
   - `docs/requirements.txt` — MkDocs 依存定義（`mkdocs==1.6.1`, `mkdocs-material==9.8.0`）
   - `docs/xv6refs.lock` — 全コード参照の行範囲と SHA-256 ロックファイル
@@ -45,13 +45,13 @@
 - `./scripts/check-lab syscall-trace`（`logs/lab-syscall-trace.log`）: **PASS**（パッチ一時適用 → ビルド → QEMU 起動 → `echo hi` の3行出力と `ls` 非出力を確認 → パッチ逆適用・SHA-256 一致確認・`make clean`）
 - `./scripts/check-refs --update` / `./scripts/check-refs`: **PASS**（6参照すべて解決・ロック一致）
 - 意図的な参照破壊テスト（`logs/check-refs-broken.log`）: **期待どおり失敗（exit 1）を確認後に復元**
-  - 存在しない関数名（`kernel/syscall.c#nosuchfunc`）: `docs/ch01-syscall.md:212` と対象参照を表示して失敗
-  - コード内容変更（パッチ一時適用による `kernel/syscall.c#syscall` 変化）: `docs/ch01-syscall.md (kernel/syscall.c#syscall)` のハッシュ不一致を表示して失敗
+  - 存在しない関数名（`kernel/syscall.c#nosuchfunc`）: 該当行番号と対象参照を表示して失敗
+  - コード内容変更（パッチ一時適用による `kernel/syscall.c#syscall` 変化）: `docs/ch04-syscall.md`（当時旧名）の `kernel/syscall.c#syscall` ハッシュ不一致を表示して失敗
 - `mkdocs build --strict`（`logs/mkdocs-build.log`）: **PASS**（警告・エラー 0、生成 HTML 内の6つの固定コミット GitHub リンク・Mermaid・補足ボックス・`<details>` 展開を確認）
 - `./scripts/test smoke && ./scripts/clean`: **PASS**（無改変 `xv6-riscv/` のビルド・起動・テスト通過と生成物削除を確認）
 - `cmp -s GEMINI.md AGENTS.md`: **PASS**（完全一致）
 
-### 第1章（`docs/ch01-syscall.md`）本文の主張とソース照合チェックリスト
+### 第4章（`docs/ch04-syscall.md`）本文の主張とソース照合チェックリスト
 
 - [x] 対象コミットが `e93dabeb98431235c6e1a101cb96c73c923fdbc4` — `VERSIONS.md`
 - [x] U-mode では `PTE_U` のないページへアクセス不可、ユーザーページテーブルにはカーネル本体やデバイスが無く `TRAMPOLINE` / `TRAPFRAME` にも `PTE_U` が付かない — `kernel/riscv.h` (`PTE_U`), `kernel/proc.c` (`proc_pagetable`), `kernel/vm.c` (`kvmmake`)
@@ -87,3 +87,30 @@
   1. **前提説明の補完**: 初出の「ページ」「シェル」「プロセス」「子プロセス」にその場で短い言い換え（「メモリ1区画、つまり1ページ分」「コマンドを受け付けるシェル」「実行中のプログラム、つまりプロセス」「分身のプロセス」）を追加し、理由番号 `8` にも「割り込みなど他の用事と見分ける理由番号」と目的を添えた。
   2. **同音異義・英字過多の解消**: `echo` 実験の `hi`（ハイ）が日本語の返事「はい」に聞こえないよう「英語の挨拶である2文字の hi」と補足し、レジスタ名の読み上げを `a0` と `a7` の2つに絞って（`a1`・`a2`・`a5` や `sscratch` 退避の細部アセンブリ説明を削減）耳での記憶負荷と説明の飛躍をなくした。
   3. **前後の繋がりと間の調整**: 第4節の戻り値「2」が唐突に聞こえないよう第4節冒頭で「write を呼んで2文字出すとき」と明示し、`exec` の未説明な戻り値読み上げを整理し、2つ目の問いかけの直後にも考える間（「ちょっと考えてみてね。」）を1文追加した。
+
+---
+
+## 5. 教科書（MIT 最新版・菅原訳）連携・章番号統一・差分整理フェーズ
+
+### 作成・変更したファイル
+
+- **新規作成**
+  - `books/README.md` — `books/mit-en/`（MIT 原文 `fa3b46bc`、2026-09-23）と `books/sugawara-ja/`（菅原訳 `de6c710a`、2020-07-23、元原文 `ca13de46`、2019-10-08）の出典・ライセンス・参照専用（ビルド不要）である旨の記録
+  - `docs/books-map.md` — MIT 最新版（全13章＋序文）・菅原訳（全9章＋序文）・本教材ページの全章・全節対応表と、2019 年版から最新版への章新設・分割・移動の整理
+  - `docs/books/trap-diff.md` — 菅原訳 第4章（`trap.tex`）と現在の `xv6-riscv/`（および MIT 最新版）のコード・記述差分一覧、ならびに `\lineref` 照合表
+- **改名・更新**
+  - `docs/ch04-syscall.md`（旧ファイルから改名） — タイトルを「第4章 トラップとシステムコール（1）アプリからOSに処理を頼む」に変更し、冒頭に対応教科書（MIT 4.1〜4.4節／菅原訳 4.1・4.3・4.5・4.6節）、末尾に第9節「教科書と並べて読むときの注意」を追加
+  - `docs/xv6refs.lock` — `./scripts/check-refs --update` により参照元パスを `docs/ch04-syscall.md` へ更新
+  - `mkdocs.yml`, `docs/index.md`, `docs/env.md`, `README.md`, `VERSIONS.md` — 教科書情報、新章番号（第4章）、`books-map.md` / `books/trap-diff.md` への導線を反映
+  - `AGENTS.md`, `GEMINI.md`（同内容） — 教科書に関する質問時に `books/` の必要な章・節のみを読むこと、和訳と現在のコードのズレは最新原文・現コードを優先して明示すること（`docs/books-map.md` / `docs/books/*-diff.md` 参照）を追加
+  - `video/ep01/script.md`, `video/ep01/description.txt`, `video/ep01/dictionary.csv` — 参照章パスおよび章番号表記を `docs/ch04-syscall.md`（第4章）へ更新
+
+### 検証コマンドと結果
+
+- 旧第1章ファイル名プレフィックスの残存検索（`.git` / `site` / `logs` 除外の `grep -rn`）: **0件**（取りこぼしなし）
+- `./scripts/check-refs`: **PASS**（6参照すべてロック一致）
+- `mkdocs build --strict`: **PASS**（警告・エラー 0）
+- `./scripts/check-lab syscall-trace`: **PASS**（パッチ一時適用 → QEMU 検証 → 逆適用・クリーンアップ成功）
+- `./scripts/script-stats --check`: **PASS**（85文・3,594字・辞書未登録ゼロ）
+- `cmp -s GEMINI.md AGENTS.md`: **PASS**（完全一致）
+- `diff -r -x .git` による `books/mit-en/`・`books/sugawara-ja/` と取り込み元との一致確認、および `xv6-riscv/` 無変更確認: **PASS**

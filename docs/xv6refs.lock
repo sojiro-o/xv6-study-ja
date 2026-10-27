@@ -2,7 +2,7 @@
   "commit": "e93dabeb98431235c6e1a101cb96c73c923fdbc4",
   "references": [
     {
-      "doc": "docs/ch01-syscall.md",
+      "doc": "docs/ch04-syscall.md",
       "ref": "kernel/syscall.c#syscall",
       "path": "kernel/syscall.c",
       "symbol": "syscall",
@@ -11,7 +11,7 @@
       "sha256": "197b66b20c20e1af78325ae3e46d2fa63f1e532795d6970d9be834cc546ef426"
     },
     {
-      "doc": "docs/ch01-syscall.md",
+      "doc": "docs/ch04-syscall.md",
       "ref": "kernel/sysproc.c#sys_kill",
       "path": "kernel/sysproc.c",
       "symbol": "sys_kill",
@@ -20,7 +20,7 @@
       "sha256": "3f168e8ea3fb2a7134df0f0d2e9901ea7fe119d9c6c5b9c1df88195d7235ed14"
     },
     {
-      "doc": "docs/ch01-syscall.md",
+      "doc": "docs/ch04-syscall.md",
       "ref": "kernel/trampoline.S#uservec",
       "path": "kernel/trampoline.S",
       "symbol": "uservec",
@@ -29,7 +29,7 @@
       "sha256": "4cc83b5583f73b89859dc09ebe70af0bc0f998ba3dfde42e0818f54adbd53a2f"
     },
     {
-      "doc": "docs/ch01-syscall.md",
+      "doc": "docs/ch04-syscall.md",
       "ref": "kernel/trap.c#usertrap",
       "path": "kernel/trap.c",
       "symbol": "usertrap",
@@ -38,7 +38,7 @@
       "sha256": "50b985f7f847ab85293e285f509dd8f304b7dbb03367328a14cb61ea246edc47"
     },
     {
-      "doc": "docs/ch01-syscall.md",
+      "doc": "docs/ch04-syscall.md",
       "ref": "user/echo.c#main",
       "path": "user/echo.c",
       "symbol": "main",
@@ -47,7 +47,7 @@
       "sha256": "da3d5589305d6fff7d2f2dade7858659c9a8df48cc3e7223548abf9ee4b23f99"
     },
     {
-      "doc": "docs/ch01-syscall.md",
+      "doc": "docs/ch04-syscall.md",
       "ref": "user/usys.pl#entry",
       "path": "user/usys.pl",
       "symbol": "entry",

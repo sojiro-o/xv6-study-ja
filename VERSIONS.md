@@ -10,6 +10,27 @@
 - コミット日時・件名: `2026-10-26 17:16:16 -0400` (`tx_busy`)
 - 配置先: `xv6-riscv/`（`.git` ディレクトリを除き、ソース無改変でコピー）
 
+## 取り込んだ教科書（参照用 LaTeX ソース）
+
+ビルドは行わず、章・節の特定やコードとの差分照合に用いるため `.git` ディレクトリを除き無改変で配置しています（詳細は [`books/README.md`](books/README.md) を参照）。
+
+### 1. MIT xv6 教科書（英語原文）
+
+- 上流リポジトリ: <https://github.com/mit-pdos/xv6-riscv-book>
+- コミット: `fa3b46bc4386fcd2c2a042f3dc850c497948b6d6`（`2026-09-23`）
+- 取り込み日: `2026-10-27`
+- ライセンス: MIT License（`books/mit-en/LICENSE`）
+- 配置先: `books/mit-en/`（`.git` 除外・無改変）
+
+### 2. 電気通信大学・菅原研究室による和訳
+
+- 上流リポジトリ: <https://github.com/sugawara-bbbb/xv6-riscv-book>
+- コミット: `de6c710ac79883a2bc68a9b9f70c1fc22de48d39`（`2020-07-23`）
+- 元になった英語原文: `mit-pdos/xv6-riscv-book` コミット `ca13de462d1936f4ff3c249fcbc261fc93c48b53`（`2019-10-08`）
+- 取り込み日: `2026-10-27`
+- ライセンス: MIT License（`books/sugawara-ja/LICENSE`）
+- 配置先: `books/sugawara-ja/`（`.git` 除外・無改変）
+
 ## 検証ホスト環境
 
 - OS: Ubuntu 26.04.1 LTS (Resolute Raccoon)

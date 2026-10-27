@@ -1,0 +1,927 @@
+% cox and mullender, semaphores.
+% 
+% process has one thread with two stacks
+%  
+% pike et al, sleep and wakeup
+\chapter{スケジューリング}
+\label{CH:SCHED}
+
+ほぼ全てのオペレーティングシステムは，コンピュータに搭載された CPU より
+も多い数のプロセスを走らせます．そのため，プロセス間で CPU をタイムシェアす
+るための計画が必要です．CPU の共有は，ユーザプロセスにとって透過的であ
+ることが理想です．一般的なアプローチは，ハードウェアの CPU に対してプロ
+セスを\indextext{マルチプレクス}する（切り替える）ことで，各プロセスが専用の CPU を
+もっているかのようにみせることです．この章では，xv6 が，どのように
+してそのようなマルチプレクスを行うのかを説明します．
+
+%% 
+\section{マルチプレクス}
+%% 
+
+あるプロセスから別のプロセスへと切り替えることでマルチ
+プレクスするシチュエーションは 2 つあります．第一
+に，xv6 が \lstinline{sleep} や \lstinline{wakeup} 機能により切り替えを行う場
+合があります．プロセスがデバイスやパイプの I/O の完了を待つとき，
+子プロセスの完了を待つときや，\lstinline{sleep} システムコールで待つときなど
+が例です．第二に，スリープせずに長時間計算を行うプロセスに対応するた
+め，xv6 が周期的に強制的な切り替えを行います．このようにマルチプレクス
+を行うことで，各プロセスが専用の CPU を持っているようにみせます．これは，
+メモリアロケータとハードウェアのページテーブルを使うことで，各プロセスが
+専用のメモリを持っているようにみせることに似ています．
+
+マルチプレクスの実装には，いくつかの課題があります．第一に，どうやって
+プロセスから別のプロセスに切り替えを行うかということです．コン
+テキストスイッチのアイディアは単純ですが，その実装は xv6 の中でもっとも不
+透明なものの 1 つです．第二に，透過性を保ちながら
+強制的に切り替えを行うにはどうしたらよいかということです．xv6 は，コンテキストス
+イッチを駆動する標準的な方法であるタイマ割込による切り替えを採用します．第
+三に，たくさんの CPU がプロセスの間を並行的にスイッチするので，競合を防
+ぐためにロックの計画が必要だということです．第四に，プロセスから出ると
+きにはメモリなどの資源を解放する必要がありますが，それをプロセス自身が
+行うことはできないということです．なぜなら（たとえば），プロセスは（ま
+だ使っているので）自身のカーネルスタックを解放することができません．第
+五に，システムコールが正しいプロセスのカーネルの状態に影響を与えること
+ができるように，マルチコアマシンの各コアが，どのプロセスを実行中か覚え
+ておかなくてはいけないということです．最後
+に，\lstinline{sleep} と \lstinline{wakeup} を使うことで，プロセスが自発的
+に CPU を手放してスリープしてイベントを待ち，いずれ別のプロセスがそのプ
+ロセスを起床させます．そのとき，競合により起床の通知を見逃してしまわな
+いように注意が必要です．xv6 は，それらの課題をできる限り単純な方法で
+解決しますが，その結果できたコードはいずれにせよトリッキーです．
+
+%% 
+\section{Code: コンテキストスイッチ}
+%% 
+
+\begin{figure}[t]
+\center
+\includegraphics[scale=0.5]{fig/switch.pdf}
+\caption{あるユーザプロセスから別のユーザプロセスへの切り替え．単独
+  の CPU で xv6 が動作する場合（すなわちスケジューラスレッドが 1 つし
+  か無い場合）}
+\label{fig:switch}
+\end{figure}
+
+図~\ref{fig:switch} に，あるユーザプロセスから別のユーザプロセスへの入
+り替えに関わるステップの概略を示します．すなわち，(i) ユーザからカーネ
+ルへの切り替え（システムコールあるいは割込をきっかけに，古いプロセスの
+カーネルスレッドに入る）, (ii) 現在の CPU のスケジューラスレッドへのコ
+ンテキストスイッチ, (iii) 新しいプロセスのカーネルスレッドへのコンテキ
+ストスイッチ，(iv) ユーザレベルプロセスへのトラップからのリターンという
+ステップで進みます．xv6 のスケジューラには，CPU ごとに専用のスレッド
+（レジスタとスタックが保存される）があります．古いプロセスのカーネルス
+タックでスケジューラを実行するのは安全ではないことがあるからです．その
+ような例を \lstinline{exit} で見ます．このセクションでは，カーネルスレッ
+ドからスケジューラスレッドへの切り替えの仕組みを説明します．
+
+あるスレッドから別のスレッドに切り替えるには，古いスレッドの CPU レジス
+タの退避と，新しいスレッドのかつて退避されたレジスタの復元が必要です．
+スタックポインタとプログラムカウンタが退避され復元されるということは，
+スタックと実行しているコードの両方が切り替わるということです．
+
+\indexcode{swtch} 関数がカーネルスレッドの切り替えに関わる退避と復元を行い
+ます．\lstinline{swtch} は，スレッドのことを直接は知らず，単にレジスタの集
+まり（\indextext{コンテキスト}と呼ばれる）の退避と復元を行います．プロセスが CPU を
+手放すときがくると，そのプロセスのカーネルスレッドは\lstinline{swtch} を呼
+んでコンテキストを保存し，それからスケジューラのコンテキストにリターン
+します．コンテキストは, \indexcode{context} 構造体 
+\lineref{kernel/proc.h:/^struct.context/}
+に入っており，それ自体がプロセスの \lstinline{proc} 構造体もしく
+は CPU の \lstinline{cpu} 構造体に入っています．\lstinline{swtch} は2つの引数
+をとります．\lstinline{struct context *old} と 
+\lstinline{struct context *new}です．\lstinline{swtch} 
+は現在のレジスタを \lstinline{old} に退避し，
+\lstinline{new} からレジスタをロードしてリターンします．
+
+\lstinline{swtch} がスケジューラにいたるまでの道のりを追いかけてみましょ
+う．\ref{CH:TRAP}~章において，割込の結果として \indexcode{usertrap} が \indexcode{yield}
+を呼ぶことがあることを見ました．\lstinline{yield} は続いて \lstinline{sched}
+を呼び，これがさらに \indexcode{swtch} を呼んで現在のコンテキスト
+を\lstinline{p->context} に退避するとともに，以前 \indexcode{cpu->scheduler}
+\lineref{kernel/proc.c:/swtch..p/}
+に退避されたスケジューラのコンテキストへ切り替わります．
+
+\lstinline{swtch}
+\lineref{kernel/swtch.S:/swtch/}
+は呼び出された側が退避すべきレジス
+タ (callee-saved register) だけを退避します．呼び出し側が退避すべきレジ
+スタ (caller-saved register) は，呼び出しを行う C のコードが，必要に応
+じてスタックに退避します．\lstinline{swtch} は，\lstinline{context} における
+各レジスタのフィールドへのオフセットを知っています．\lstinline{swtch} は，
+プログラムカウンタは退避しません．そのかわ
+り，\lstinline{swtch} は，\lstinline{swtch} 関数からのリターンアドレスが入っ
+た \lstinline{ra} レジスタを保存します．\lstinline{swtch} がリターンすると，
+復元された \lstinline{ra} レジスタに入っていたアドレスにリターンします．そ
+れは，新しいスレッドが以前 \lstinline{swtch} を呼び出した命令を指していま
+す．さらに，\lstinline{swtch} は新しいスレッドのスタックを用いてリターンし
+ます．
+
+私たちの例では，\indexcode{sched} が \indexcode{swtch} を呼び出すことで，
+各 CPU のスケジューラのコンテキストである \indexcode{cpu->scheduler} に切
+り替わっていました．このコンテキストは，スケジューラが \lstinline{swtch}
+\lineref{kernel/proc.c:/swtch.&c/}
+を呼んだときに退避されたものです．
+これまで私たちが追いかけてきた \lstinline{swtch} がリターンすると，
+それは \lstinline{sched} ではなく \indexcode{scheduler} にリターンします．そして
+そのスタックポインタは，現在の CPU のスケジューラのスタックを指しています．
+
+%% 
+\section{Code: スケジューリング}
+%% 
+
+前のセクションでは，\indexcode{swtch} の低レベルの詳細を見ました．ここから
+は，\lstinline{swtch} はあるものとして，あるプロセスのカーネルスレッドが，
+スケジューラを経由して別プロセスに切り替わる様子を見てみましょう．スケジュー
+ラは，CPU ごとの特殊なスレッドとして存在し，それぞれがスケジュールのた
+めの関数を実行しています．この関数は，次に実行するプロセスを選ぶ責任が
+あります．CPU を手放そうとしているプロセスは，自身のプロセスロックであ
+る \indexcode{p->lock} を取得し，ほかのロックを全て解放し，自身の状
+態 (\lstinline{p->state}) を更新し，そして \indexcode{sched} を呼びます．続い
+て，\lstinline{sleep} や \lstinline{exit} と同様に \lstinline{yield}
+\lineref{kernel/proc.c:/^yield/}
+を呼びます．それについては，あとで詳しく説明しま
+す．\indexcode{sched} はそれらの条件と \linerefs{kernel/proc.c:/if..holding/,/running/}, 
+その条件が意味するところをダブルチェックします．ロックを所持しているので，割込は
+無効になっているはずです．最後に，\indexcode{sched} は \indexcode{swtch} を呼
+んで現在のコンテキストを \lstinline{p->context} に退避するととも
+に，\indexcode{cpu->scheduler} に入ったスケジューラのコンテキストに切り替
+わります．\lstinline{swtch} は，あたかも \indexcode{scheduler}が呼ん
+だ \lstinline{swtch} からリターンしたかのように，スケジューラのスタックを
+用いてリターンします
+\lineref{kernel/proc.c:/swtch.*schedul.*contex/}．
+スケジューラは \lstinline{for} ルー
+プを進み，実行すべきプロセスを見つけ，それに切り替わります．そして以上
+をくり返します．
+
+いま，\lstinline{swtch} の呼び出しにおいて，xv6 は \indexcode{p->lock} を所持
+していました．\indexcode{swtch} の呼び出し元は，その時点でロックを所持して
+いなくてはならず，そのロックは切り替え先のコードに持ち越されます．これ
+は，ロックにおいて普通ではないことです．普通であれば，ロックを取得した
+のと同じスレッドが，その解放にも責任を持つことで，正しさの理由付けを簡
+単にしています．コンテキストスイッチでは，その慣習を破る必要があります．
+なぜなら \indexcode{p->lock} はプロセス
+の \lstinline{state} と \lstinline{context} フィールドに関する不変量を保護し
+ており，それは \indexcode{swtch} の実行中は正しくないからで
+す．\lstinline{swtch} 時に \lstinline{p->lock} を取得していなかったとしたら次
+のような問題が生じます: \indexcode{yield} が状態を \lstinline{RUNNABLE} にし
+たあと，しかし \lstinline{swtch} がそのカーネルスタックの使用を止めるまえ
+に，他の CPU がそのプロセスを実行しようとする可能性があります．そうする
+と，2つの CPU が同じスタックで実行を行うことになり，それはまずいことで
+す．
+
+カーネルスレッドは，いつも \lstinline{sched} で CPU を手放し，スケジューラ
+の同じ場所に切り替わります．そしてそのスケジューラは（ほぼ）いつでも，
+以前 \lstinline{sched} を呼んだカーネルスレッドに切り替わります．よって，
+もし xv6 がスレッドを切り替える箇所を表示すると，単純なパターンを見るこ
+とができます．
+% \lineref{kernel/proc.c:/swtch..c/},
+% \lineref{kernel/proc.c:/swtch..p/},
+\lineref{kernel/proc.c:/swtch..c/},
+\lineref{kernel/proc.c:/swtch..p/} などです．２つのスレッド間のこ
+のようなスタイルの定まった切り替えは，\indextext{コルーチン} (coroutine) と呼ばれることがありま
+す．この例では，\indexcode{sched} と \indexcode{scheduler} はお互いのコルーチンです．
+
+スケジューラの \indexcode{swtch} の呼び出しが \indexcode{sched} にたどり着か
+ないケースが1つあります．新しいプロセスが最初にスケジュールされるとき，
+それは \lstinline{forkret} 
+\lineref{kernel/proc.c:/^forkret/}
+から開始しま
+す．\lstinline{forkret} は，\indexcode{p->lock} を解放するためにあります．そ
+れとは別に，その新しいプロセスが \lstinline{usertrapret} から開始する場合
+もありえます．
+
+\lstinline{scheduler}
+\lineref{kernel/proc.c:/^scheduler/} 
+は単純なループを実行します．実行
+するプロセスを見つける，それが CPU を手放すまで実行する，繰り返す．スケジューラ
+はプロセステーブルをループして，実行可能なプロセス，すなわ
+ち\lstinline{p->state == RUNNABLE} であるものを探します．もしそのようなプロセスを
+見つけたら，CPU 固有の現在のプロセスを表す変数である \lstinline{c->proc} に値を
+セットし，そのプロセスを \lstinline{RUNNING} にし，そして \indexcode{swtch} を
+呼んで実行を開始します \linerefs{kernel/proc.c:/Switch.to/,/swtch/}.
+
+スケジュール用のコードの構造は，プロセスに関するいくつかの不変量を強制
+するものであり，もし不変量が敗れるときは常に \indexcode{p->lock} を取得
+するものであると考えることができます．不変量の1つは, そのプロセス
+が \lstinline{RUNNING} であるならば，タイマ割込による \indexcode{yield}で
+安全にそのプロセスから抜けることができるというものです．それはつま
+り，CPU レジスタがそのプロセスのレジスタの値をとっており（つま
+り \lstinline{swtch} が\lstinline{context} に移動しておらず
+），\lstinline{c->proc} がそのプロセスを指していることを意味します．さらに
+別の不変量は，プロセスが \indexcode{RUNNABLE} であれば，空いた CPU のス
+ケジューラが実行しても安全であるというものです．それ
+は，\indexcode{p->context} がそのプロセスのレジスタを保存しているこ
+と (本物のレジスタには入っていないこと)，そのプロセスのカーネルスタック
+を使っている CPU が無いこと，そしてどの CPU でも \lstinline{c->proc} はそ
+のプロセスを指していないことを意味します．\lstinline{p->lock} を所持するあ
+いだ，それらの性質が満たされない瞬間があることを思い出してみてくださ
+い．
+
+上記の不変量を保つことが，xv6 があるスレッドで \indexcode{p->lock} を取得
+し，別のスレッドで解放することを頻繁に行う理由です．たとえ
+ば，\lstinline{yield} におけるロック取得や，\lstinline{scheduler} における解
+放です．\lstinline{yield} がプロセスの状態を \lstinline{RUNNABLE} に変更しよ
+うとし始めたら，不変量が回復するまでロックを保持し続けなくてはいけませ
+ん．正しく解放できるもっとも近いポイントは，（自身のスタックで実行する)
+\lstinline{scheduler} が \lstinline{c->proc} をクリアしたあとです．
+同様に，スケジューラが \lstinline{runnable} なプロセスを \lstinline{running} に
+変更しはじめたら，(\lstinline{swtch} のあと，\lstinline{yield} の中など) で
+カーネルスレッドが完全に実行されるまでロックを解放することはできません．
+
+\indexcode{p->lock} は他のものも保護していま
+す．\indexcode{exit} と \indexcode{wait} の相互作用は，起床の見逃しを防ぐしく
+みであり (\ref{sec:sleep}~節を見てください)，抜けようとしているプロセスと，その状態
+の読み書きを行う別プロセス（たとえば，\lstinline{exit} システムコール
+が\lstinline{p->pid} を見て \lstinline{p->killed} を書く場
+合 \lineref{kernel/proc.c:/^kill/}) の競合を避ける仕組みでもあります．分かりやすさ
+や性能のために，\lstinline{p->lock} の別の機能が分割できないかどうか考えて
+みると良いかもしれません．
+
+%% 
+\section{Code: \texttt{mycpu} と \texttt{myproc}}
+%% 
+
+xv6 では，現在プロセスの \lstinline{proc} 構造体へのポインタがよく必要に
+なります．単一プロセッサにおいては，現在の \lstinline{proc} 構造体を指すグ
+ローバル変数を持っておくこともできますが，マルチコアのマシンではできま
+せん．各コアが異なるプロセスを実行するからです．各コアが固有に持つレジ
+スタを使うことで，その問題を解決することができます．そのようなレジスタ
+の1つを使うことで，コアごとの情報を効率的に見つけることができるようにな
+ります．
+
+xv6 は，各 CPU ごとに \indexcode{cpu} 構造体を管理します
+\lineref{kernel/proc.h:/^struct.cpu/}. 
+この構造体には次のような情報が記録されま
+す: その CPU で現在実行しているプロセス（もしあるなら），その CPU のス
+ケジューラスレッドの退避したレジスタ，（割込の無効化に必要な）入れ子に
+なったスピンロックの数．\indexcode{mycpu} 関数 \lineref{kernel/proc.c:/^mycpu/} は，現在
+の CPU の \lstinline{cpu} 構造体へのポインタを返します．RISC-V はそれぞれ
+の CPU に識別番号として \indexcode{hartid} を与えます．xv6 は，カーネルに
+いるあいだは，\lstinline{tp} レジスタにその CPU の \lstinline{hartid} を入れ
+ておきます．\lstinline{mycpu} は \lstinline{tp} レジスタの値をインデックスと
+して \lstinline{cpu} 構造体の配列を引くことで，自身のための \lstinline{cpu}
+構造体を見つけることができます．
+
+CPU の \lstinline{tp} が常にその CPU の \lstinline{hartid} を持つように保証す
+るのは少し入り組んでいます．CPU の起動シーケンスの早い段階，まだマシン
+モードにいるあいだに，\lstinline{mstart} が \lstinline{tp} レジスタを設定します
+\lineref{kernel/start.c:/w_tp/}. 
+\lstinline{usertrapret} が，トランポリンページにお
+いて \lstinline{tp} を退避します．ユーザプロセスが \lstinline{tp} を書き換え
+てしまうかもしれないからです．最終的に，ユーザ空間からカーネル空間に入
+るとき，\lstinline{uservec} が退避しておいた \lstinline{tp} を復元します
+\lineref{kernel/trampoline.S:/make tp hold/}．
+xv6 が直接 \lstinline{hartid} を読み取れればよ
+いのですが，それは（スーパーバイザモードではなく）マシンモードでしかで
+きません．
+
+\lstinline{cpuid} と \lstinline{mycpu} の返値は賞味期限が短いです．もしタイマ
+が割り込んでそのスレッドが CPU を手放し，そしてそのあと別の CPU に移動したとすると，
+以前に取得した返値はもう正しくありません．そのような問題を避けるために，
+それらの関数を呼び出すときは割込を無効化し，返った \lstinline{cpu} 構造体
+を使い終わるまでは有効化してはいけません．
+
+\indexcode{myproc} 関数 \lineref{kernel/proc.c:/^myproc/} は，その CPU で現在実行中のプロ
+セスの \lstinline{proc} 構造体へのポインタを返します．\lstinline{myproc} は割
+込を無効化し，\lstinline{mycpu} を呼び，\lstinline{cpu} 構造体から現在のプロ
+セスへのポインタ (\lstinline{c->proc}) を取得し，そして割込を再度有効化します．
+\lstinline{myproc} の返値は，割込が有効なときでも安全に使うことができます．
+もしタイマ割込がそのプロセスを別の CPU に移動させた場合でも，
+\lstinline{proc} 構造体へのポインタは変わらないからです．
+
+%% 
+\section{\texttt{sleep} と \texttt{wakeup}}
+\label{sec:sleep}
+%% 
+
+スケジューリングとロックは，あるプロセスを別のプロセスから隠す手伝いを
+しますが，プロセス間が意図的に相互通信をするところは抽象化されていませ
+んでした．その問題を解決するために，たくさんのメカニズムが発明されまし
+た．xv6 はそのうち，''sleep and wakeup'' という方法を用います．これを使
+うと，あるプロセスはイベントを待つために眠り，そのイベントが起きたら別
+のプロセスが起床させることができます．''sleep and wakeup'' はよ
+く，\indextext{sequence coordination} または \indextext{conditional synchronization}
+メカニズムと呼ばれます．
+
+例示のために，生産者と消費者の調整をする，\indextext{セマ
+  フォ}~\cite{dijkstra65} と呼ばれる同期メカニズムを考えてみましょ
+う．セマフォは，ある数を管理しており，2つのオペレーション
+を提供します．（生産者のための）\texttt{V} オペレーションは，その数
+を 1 つ増やします．（消費者のための）\texttt{P}オペレーションは，その数
+が非ゼロになるまで待ち，そのあとで数字を 1 つ減らしてリターンします．も
+し生産者と消費者のスレッドが1つずつしかなく，それぞれが別の CPU で実行
+しており，かつ CPU がアグレッシブな最適化をしないならば，以下が正しい実
+装です．
+\begin{lstlisting}[numbers=left,firstnumber=100]
+  struct semaphore {
+    struct spinlock lock;
+    int count;
+  };
+
+  void
+  V(struct semaphore *s)
+  {
+     acquire(&s->lock);
+     s->count += 1;
+     release(&s->lock);
+  }
+
+  void
+  P(struct semaphore *s)
+  {
+     while(s->count == 0)
+       ;
+     acquire(&s->lock);
+     s->count -= 1;
+     release(&s->lock);
+  }
+\end{lstlisting}
+
+上記の実装は高コストです．生産者が滅多に動かないとき，消費者はほとんど
+の時間を，\lstinline{while} ループのなかで非ゼロの値を期待しながらスピンす
+るのに浪費してしまいます．消費者の CPU は，\lstinline{s->count} を何度もポー
+リングして\indextext{ビジーウェイト}するよりも，もっと生産的なことをすべきです．
+ビジーウェイトを避けるには，消費者が CPU を手放し，\lstinline{V} が
+数を増やしたあとにかぎり再開する方法が必要です．
+
+
+そのような方向にすすめるためのステップは次の通りです（ただし後ほど，こ
+れでは不十分だと分かります）．\indexcode{sleep} と \indexcode{wakeup}という一
+対の関数呼び出しを考えましょう．これらは，次のように動きま
+す．\lstinline{sleep(chan)} は，\indextext{ウェイトチャネル} と呼ばれる任意の
+値 \indexcode{chan} に対して眠ります．\lstinline{sleep} は呼び出したプロセス
+を眠った状態にし，他の仕事のために CPU を手放しま
+す．\lstinline{wakeup(chan)} は，\lstinline{chan} に対して眠っている全てのプ
+ロセス（もしあれば）を起床させ，それらの \lstinline{sleep} 呼び出しからリ
+ターンさせます．もしその \lstinline{chan} を待つプロセスが居なかった
+ら，\lstinline{wakeup} は何もしません．この \lstinline{sleep} と \lstinline{wakeup} を
+使うと，セマフォの実装は次のように変えることができます（変更部分を黄色でハイライトしています）．
+%
+\begin{lstlisting}[numbers=left,firstnumber=200]
+  void
+  V(struct semaphore *s)
+  {
+     acquire(&s->lock);
+     s->count += 1;
+     (*@\hl{wakeup(s);}@*)
+     release(&s->lock);
+  }
+  
+  void
+  P(struct semaphore *s)
+  {
+    while(s->count == 0)    (*@\label{line:test}@*)
+      (*@\hl{sleep(s);}@*)  (*@\label{line:sleep}@*)
+    acquire(&s->lock);
+    s->count -= 1;
+    release(&s->lock);
+  }
+\end{lstlisting}
+
+% \begin{figure}[t]
+% \center
+% \includegraphics[scale=0.5]{fig/deadlock.pdf}
+% \caption{Example lost wakeup problem}
+% \label{fig:deadlock}
+% \end{figure}
+
+\texttt{P} は，スピンするかわりに CPU を手放すようになりました．これは
+良いことです．しかし，このようなインタフェース
+で\texttt{sleep} と \texttt{wakeup} を実装しようとすると，
+\indextext{起床の見逃し問題} (lost wake-up problem) と呼ばれる問題を避けるのは容易ではありませ
+ん．\ref{line:test}~行目において，\texttt{P} が \texttt{s->count == 0} であることに
+気づいたとしましょう．\texttt{P} が \ref{line:test}~行目と \ref{line:sleep}~行目の間にいるあいだ，
+別の CPU で実行している \texttt{V} が \texttt{s->count} を非ゼロに変更
+し，\texttt{wakeup} を呼んだとします．この \texttt{wakeup} は眠っている
+プロセスを見つけることはできず，よって何もしません．続いて \texttt{P}は
+続いて \ref{line:sleep}~行目を実行し，\texttt{sleep} を呼んで眠ります．これは問題で
+す．\texttt{P} が，すでに終わってしまった \texttt{V} の呼び出しを待って
+いるからです．運良く生産者が \texttt{V} をもう一度呼ばない限り，消費者
+は（数が非ゼロであるにもかかわらず）永久に待つことになります
+（デッドロックしてしまいました\index{deadlock}）．
+
+
+この問題の根源は，「\lstinline{p} は \lstinline{s->count == 0} のときに限り眠
+る」という不変量が，まずいタイミングでの \lstinline{V} の実行により破れた
+ことにあります．不変量を保護するための間違った方法は，\lstinline{P} におけ
+るロックの取得を移動し（黄色でハイライトしています），数のチェックと \lstinline{sleep} の
+呼び出しをアトミックにすることです．
+\begin{lstlisting}[numbers=left,firstnumber=300]
+  void
+  V(struct semaphore *s)
+  {
+    acquire(&s->lock);
+    s->count += 1;
+    wakeup(s);
+    release(&s->lock);
+  }
+  
+  void
+  P(struct semaphore *s)
+  {
+    (*@\hl{acquire(\&s->lock);}@*)
+    while(s->count == 0)    (*@\label{line:test1}@*)
+      sleep(s);             (*@\label{line:sleep1}@*)
+    s->count -= 1;
+    release(&s->lock);
+  }
+\end{lstlisting}
+ロックにより \lstinline{V} が \ref{line:test1}~行目と \ref{line:sleep1}~行目の間で実行できなくなるの
+で，\lstinline{P} による \lstinline{wakeup} の見逃しががなくなると期待するか
+もしれません．それはその通りなのですが，これはデッドロックで
+す．\lstinline{P} は眠る間ロックを所持し続けているので，\lstinline{V} はその
+ロックを永久に待つことになります．
+
+\lstinline{sleep} のインタフェースを変更することで，先の方法の問題を解決で
+きます．呼び出し側が \lstinline{sleep} にロックを渡すようにします．そうす
+ることで，呼び出し元プロセスが sleep のチャネルを待ちながら眠ったあと
+に，\lstinline{sleep} は渡されたロックを解放できます．そのロック
+は，\lstinline{P} が眠るまで，並行する \lstinline{V} を待たせます．そうするこ
+とで，\lstinline{wakeup} は眠ってる消費者をみつけ，それを起床させることが
+できるようになります．消費者が再び起床したら，\indexcode{sleep} はリターン
+前にそのロックを再取得します．以上の正しい \lstinline{sleep}/\lstinline{wakeup}
+の方法は，次のように使うことができます（変更点を黄色でハイライトしています）．
+%
+\begin{lstlisting}[numbers=left,firstnumber=400]
+  void
+  V(struct semaphore *s)
+  {
+    acquire(&s->lock);
+    s->count += 1;
+    wakeup(s);
+    release(&s->lock);
+  }
+
+  void
+  P(struct semaphore *s)
+  {
+    acquire(&s->lock);
+    while(s->count == 0)
+       (*@\hl{sleep(s, \&s->lock);}@*)
+    s->count -= 1;
+    release(&s->lock);
+  }
+\end{lstlisting}
+
+\lstinline{P} が \lstinline{s->lock} を持つことで，\lstinline{P} によ
+る \lstinline{c->count} のチェックと \lstinline{sleep} 呼び出しの合間
+に，\lstinline{V} が起床しようとすることはなくなります．ただ
+し，\lstinline{sleep} は，\lstinline{s->lock} の解放と，消費者プロセスを眠らせ
+ることをアトミックに行わなくてはいけない点に注意が必要です．
+
+%% 
+\section{Code: Sleep と wakeup}
+%% 
+
+\indexcode{sleep}
+\lineref{kernel/proc.c:/^sleep/}
+と \indexcode{wakeup}
+\lineref{kernel/proc.c:/^wakeup/}.
+の実装を見てみましょう．基本的なアイディアは次のよ
+うなものです．\lstinline{sleep} は現在のプロセスを \indexcode{SLEEPING} にマー
+クし，そのあとで \indexcode{sched} を呼んで CPU を手放します．一
+方，\lstinline{wakeup} は，与えられたウェイトチャネルで待つプロセス
+を検索し，それらを \indexcode{RUNNABLE} にマークしま
+す．\lstinline{sleep} と \lstinline{wakeup} の呼び出し元は，お互いに都合がよ
+いどのような数値もチャネルとして使うことができます．xv6
+は，待機に関わるカーネルのデータ構造のアドレスを，そのための値としてよ
+く用います．
+
+\lstinline{sleep} は \indexcode{p->lock} を取得します
+\lineref{kernel/proc.c:/DOC: sleeplock1/}. 
+いままさに眠りにつこうとしているプロセス
+は，\lstinline{p->lock} と \lstinline{lk} の両方を所持します. \lstinline{lk} は
+呼び出し元（例では \lstinline{P}）で取得する必要があります．\lstinline{lk} は，
+他のプロセス（例では \lstinline{V}）が \lstinline{wakeup(chan)} の呼び出しを
+行わないことを保証します．\lstinline{sleep} が \lstinline{p->lock} 取得すると
+ころまで来たら，\lstinline{lk} を解放しても安全です．他のプロセス
+が \lstinline{wakeup(chan)} の呼び出しを始めるかもしれません
+が，\lstinline{wakeup} は \lstinline{p->lock} を取得するために待つからです．
+\lstinline{wakeup} は \lstinline{sleep} がプロセスを眠らせるまで
+待つようになるので，\lstinline{wakeup} が \lstinline{sleep} を見逃すことが
+なくなります．
+
+少し混乱しやすいところがあります．\lstinline{lk} が\lstinline{p->lock} と同じ
+ものだと，\lstinline{sleep} は \lstinline{p->lock} を取得しようとしたときに，
+自身に対してデッドロックします．しかし，そもそも \lstinline{sleep} を呼ぶ
+プロセスがすでに \lstinline{p->lock} を取得しているならば，それ以上何もし
+なくても \lstinline{wakeup} の見逃しは起きません．このケース
+は，\lstinline{wait}
+\lineref{kernel/proc.c:/^wakeup\(/}
+が \lstinline{p->lock} を引数として\lstinline{sleep} を呼ぶときに生じます．
+
+ここまで来たら，\texttt{sleep} は \texttt{p->lock} のみを所持しま
+す．\texttt{sleep} は対象のプロセスを眠らせるために，sleep のチャネル
+を記録し，プロセスの状態を変更し，そし
+て \texttt{sched} \linerefs{kernel/proc.c:/chan.=.chan/,/sched/} を呼びます．
+
+%プロセスが \texttt{SLEEPING} にマークされるまで，\texttt{p->lock} を（スケジュー
+%ラによって）解放しないことが重要である理由がすぐに分かります．
+
+
+その後のある時点で，プロセスは
+\lstinline{wakeup(chan)} を呼びます
+\lineref{kernel/proc.c:/^wakeup\(/}．
+% 
+% 条件ロックを所持した状態
+% で \lstinline{wakeup(chan)} を呼ぶことは重要です\footnote{厳密にいう
+%   と，\lstinline{wakeup} は単に \lstinline{acquire} に続くだけで十分です (す
+%   なわち，\lstinline{release} のあとに \lstinline{wakeup} を呼ぶことができま
+%   す)．}．
+\lstinline{wakeup} は，プロセステーブルに対してループしま
+す．その際，\lstinline{wakeup} は，検査する対象のプロセ
+スの\lstinline{p->lock} を取得します．なぜなら，プロセスの状態を操作する可
+能性があるととも
+に，\lstinline{p->lock} は \lstinline{sleep} と \lstinline{wakeup} がお互いを見
+逃さないことを保証してくれるからです．所与の \indexcode{chan} で待
+つ \indexcode{SLEEPING} 状態のプロセスを見つけると，\lstinline{wakeup} はその
+プロセスの状態を \indexcode{RUNNABLE} に変更します．次にスケジューラが
+実行したとき，そのプロセスは実行する準備ができています．
+
+xv6 のコードは，条件ロックを持っているときは常に \lstinline{wakeup} を
+呼びます．セマフォの例では \lstinline{s->lock} がロックでした．厳密に言
+えば，\lstinline{acquire} の次に必ず \lstinline{wakeup} があれば十分で
+す（つまり，\lstinline{release} のあとに \lstinline{wakeup} を呼ぶとい
+うことです）．上記の \lstinline{sleep} と \lstinline{wakeup} に関するロッ
+クのルールが，眠っているプロセスが \lstinline{wakeup} の見逃しを防ぐの
+はなぜでしょうか？眠りにつこうとするプロセスは，条件をチェックしてから
+状態が \lstinline{SLEEPING} にマークされるまでのあいだ，条件ロック，自
+身の \lstinline{p->lock}，もしくは両方を所持します．\lstinline{wakeup}
+を呼ぶプロセスは，\lstinline{wakeup} のループにおいて，それらのロックを
+両方を所持します．よって，起こす役目のプロセスは，消費者スレッドが条件
+をチェックする前に条件を真にするか，あるいは \lstinline{SLEEPING} にマー
+クされたスレッドを \lstinline{wakeup} で見つけるかのいずれかしかありえ
+ません．よって，\lstinline{wakeup} は眠っているプロセスを見つけ，起床を
+させることができます（誰かが先に起床をさせていない場合に限ります）．
+
+複数のプロセスが，同じチャネルに対して待つケースがあります．たとえ
+ば，2つ以上のプロセスが 1 つのパイプから読み込みを行う場合で
+す．\lstinline{wakeup} を 1 度呼べば，それら全てを起床させます．そのうち
+の 1 つが最初に実行を行い，\lstinline{sleep} 呼び出しに使ったロックを取得
+し，そして（パイプの場合であれば）パイプに入っている何らかのデータを読
+みます．他のプロセスは，せっかく起床しましたが，読み込むデータが無い
+ことに気づきます．それらのプロセスの視点で，これは「偽の」起床であり，
+再び眠りにつきます．\lstinline{sleep} を，常に条件をチェックするループの
+中で呼び出すのはそのためです．
+
+二者が偶然同じチャネルを選んで  \texttt{sleep}/\texttt{wakeup} を呼
+んだとしても害はありません．偽の起床は発生しますが，上記のようにルー
+プを繰り返すのでこの問題は許容できます．
+\texttt{sleep}/\texttt{wakeup} の魅力の大部分は，両方とも軽量であること
+（sleep のチャネルとして動く特別なデータ構造を作らなくてもよい）と，
+間接的なアクセスの層を提供すること（呼び出し元は，相手がどのプロセスなのか
+知らなくてもよい）ことにあります．
+
+%% 
+\section{Code: パイプ}
+%% 
+\lstinline{sleep} と \lstinline{wakeup} により生産者・消費者を同期化するより
+複雑な例は，xv6 のパイプの実装です．パイプのインタフェースは 1 章で見ま
+した．パイプの片方の端にバイト列を書き込むと，それはカーネル内のバッファ
+にコピーされ，そしてパイプのもう片方の端から読み出せる，というものでし
+た．続く章では，ファイルディスクリプタがパイプをどのようにサポートするか
+説明しますが，ここでは \indexcode{pipewrite} と \indexcode{piperead} の
+実装を見てみることにします．
+
+各パイプは，\indexcode{pipe} 構造体で表現されます．各構造体には，ロックと
+データバッファが含まれます．\lstinline{nread} と \lstinline{nwrite} フィール
+ドは，バッファに読み書きされたデータの総数をカウントします．バッファは循環し
+ており，\lstinline{buf[PIPESIZE-1]} の次のバイトは \lstinline{buf[0]} です．
+それに対し，カウントした数値は循環しません．そのように決めることで，バッファ
+が満杯の状態 \lstinline{(nwrite == nread+PIPESIZE)} と空の状
+態 \lstinline{(nwrite ==nread)} を区別できます．しかし，これは，
+バッファをインデックスするには，\lstinline{buf[nread]} ではなく，
+\lstinline{buf[nread % PIPESIZE]} を使わなくてはいけないということです
+（\lstinline{nwrite} でも同様です）．
+
+別の CPU において，\lstinline{piperead} と \lstinline{pipewrite} が同時に起き
+たとしましょう．\lstinline{pipewrite} 
+\lineref{kernel/pipe.c:/^pipewrite/}
+は，まずそのパイ
+プのロックを取得します．そのロックは，カウント数，データ，および関連す
+る不変量を保護しています．\lstinline{piperead}
+\lineref{kernel/pipe.c:/^piperead/} もまた，
+そのロックを取得しようとしますが失敗し，\lstinline{acquire} でロックを待っ
+てスピンします
+\lineref{kernel/spinlock.c:/^acquire/}．
+\lstinline{piperead} が待つあい
+だ，\lstinline{pipewrite} は書き込むデータに対してループを行
+い(\lstinline{addr[0..n-1]})，それぞれをパイプに加えていきます
+\lineref{kernel/pipe.c:/nwrite\+\+/}．
+このループにおいて，バッファが満杯になることがありえます
+\lineref{kernel/pipe.c:/DOC: pipewrite-full/}．
+その場
+合，\lstinline{pipewrite} は\lstinline{wakeup} を呼ぶことで，眠っているプロセ
+スに対してデータが待っていることを伝え，それから\lstinline{&pi->nwrite}
+に対してスリープすることで，他のプロセスがバッファからバイト列を取り除
+いてくれることを待ちます．\lstinline{sleep} は，\lstinline{pipewrite} の
+プロセスを \lstinline{sleep} させる処理の一環で \lstinline{pi->lock} を解放します．
+
+\lstinline{pi->lock} が使えるようになったので，\lstinline{piperead} はそれを
+取得してクリティカルセクションに入り，\lstinline{pi->nread != pi->nwrite}
+であることに気づきます
+\lineref{kernel/pipe.c:/DOC: pipe-empty/}
+（\lstinline{pipewrite} は \lstinline{pi->nwrite == pi->nread+PIPESIZE} 
+なので眠りについたのでした
+\lineref{kernel/pipe.c:/pipewrite-full/})．
+よって，\lstinline{piperead} は \lstinline{for} ループに進み，パイプからデータをコピーし
+\lineref{kernel/pipe.c:/DOC: piperead-copy/}，
+そして読んだバイト数だ
+け \lstinline{nread} を増加させます．バッファには書き込みの余裕がたくさん
+できたので，\lstinline{piperead} は \lstinline{wakeup} を呼んで眠っている書き
+込み用プロセスを起床させ
+\lineref{kernel/pipe.c:/DOC: piperead-wakeup/}，
+そしてリターンします．\lstinline{wakeup} は\lstinline{&pi->nwrite} でスリープしているプロセス
+を見つけます．これは，先ほど \lstinline{pipewrite} を実行して，バッファが
+満杯なので眠ったプロセスです．\lstinline{wakeup} は，そのプロセス
+を \indexcode{RUNNABLE} にマークします．
+
+パイプのコードは，読み込みを行うプロセスと書き込みを行うプロセスに対し，
+別の sleep のチャネルを使いま
+す (\lstinline{pi->nread} と \lstinline{pi->nwrite} です)．そうすることで，
+（あまりありませんが）読み込み・書き込みプロセスが大量にいるときに効率
+的になります．パイプのコードは，条件をチェックするループの内側で眠ります．
+一番最初に起床したプロセス以外は，条件が偽のままであることに気づき，再び眠ります．
+
+%% 
+\section{Code: \texttt{wait}, \texttt{exit}, および \texttt{kill}}
+%% 
+\lstinline{sleep} と \lstinline{wakeup} はいろいろなものを待つのに使えます．
+おもしろい例は，~\ref{CH:UNIX}~章で紹介した，子プロセスの \indexcode{exit} と親プロセス
+の \lstinline{wait} に関するやりとりです. 子が死んだとき，親
+は \lstinline{wait} ですでに眠っているかもしれませんし，なにか別のことをし
+ているかもしれません．後者の場合，あとから呼んだ \lstinline{wait} が子供が死
+んだことに気づけなくてはいけません．\lstinline{wait} が観察するときまで，子供
+の死を記録しておくために，\lstinline{exit} は呼び出し元プロセスを \lstinline{ZOMBIE}
+状態にします．その子プロセスは，親プロセスの \lstinline{wait} が気づくまで，
+その状態のままでいます．\lstinline{wait} は，子プロセスの状態
+を\lstinline{UNUSED} にし，子プロセスの終了ステータスをコピーし，そして親
+プロセスに対して子プロセスのプロセス ID を返します．もし親プロセスが子
+プロセスよりも先に終了する場合，親プロセスはその子プロセスを，永久
+に \lstinline{wait} を呼び続けている \lstinline{init} プロセスに渡します．よっ
+て，どんな子プロセスにも，終了後に片付けをしてくれる親プロセスがいることになります．
+実装上の大きな課題は，親と子の \lstinline{wait} と \lstinline{exit}，もしく
+は\lstinline{exit} と \lstinline{exit} に関わる競合とデッドロックです．
+
+\lstinline{wait} は，呼び出し元プロセスの \lstinline{p->lock} をロックとして
+用いることで，\lstinline{wakeup} の見逃しを防ぎますが，ロックの取得
+は \lstinline{start}
+\lineref{kernel/proc.c:/^wait/}
+で行います．そのあと，プロセステー
+ブルをスキャンします．\lstinline{ZOMBIE} 状態の子を見つける
+と，\lstinline{wait} は子の資源と \lstinline{proc} 構造体を解放
+し，\lstinline{wait} の引数のアドレス (0でなければ) に子の終了コードをコピー
+し，そして子のプロセス ID をリターンします．子をみつけたがま
+だ終了していなかったとき，\lstinline{wait} は\lstinline{sleep} を呼んでどれか
+が終了するまで待ち
+\lineref{kernel/proc.c:/DOC: wait-sleep/}，
+そして再びスキャンします．このとき，
+\lstinline{sleep} が解放する条件ロックは待っているプロセス
+の\lstinline{p->lock} であり，上で述べた特殊例にあたります．\lstinline{wait}
+は 2 つのロックを取得することがよくありますが，子のロックを取得しようと
+するまえに，まず自身のロックを取得します．そうすることで，xv6 全体が同
+じロック順序（まず親，続いて子）になってデッドロックを避けることができ
+ます．
+
+\texttt{wait} は，各プロセスの \texttt{np->parent} を見て子を探します．
+そのとき，\texttt{np->lock} を取得せずに \texttt{np->parent} を使います．
+これは，共有されている変数はロックで守らなくてはいけないという通常の
+ルールを破っています．そうしてもよいのは，\texttt{np} が現在のプロセ
+スの先祖だからであり，\texttt{np->lock} を取得すると上で述べたロックの
+取得順序に違反してデッドロックを起こすからです．ロックを取得せず
+に \texttt{np->parent} を調べるのは，このケースでは安全なはずです．プロ
+セスの \texttt{parent} フィールドは，親のみが変更するの
+で，\texttt{np->parent==p} が成り立つならば，現在のプロセスが変更しな
+い限り，その値は変わらないはずだからです．
+
+\texttt{exit}
+\lineref{kernel/proc.c:/^exit/}
+は終了ステータスを記録し，資源を解放
+し，全ての子を \texttt{init} プロセスに渡し，待っている場合は親を
+起床させ，呼び出し元を \texttt{ZOMBIE} とマークし，そして永久に CPU を
+手放します．最後のシーケンスは少しトリッキーです．終了しつつあるプロセスは，
+その状態を \texttt{ZOMBIE} にして親を起床させるあいだ，親のロックを所持
+しなくてはなりません．なぜなら，親のロックは \texttt{wakeup} の見逃しを
+ガードする条件ロックだからです．また，そうしないと，\texttt{ZOMBIE} 状
+態をみた親が，まだ実行中の子プロセスを解放してしまうかもしれないからです．
+ロックの取得順序は，デッドロックを避けるために重要です．\texttt{wait}
+は子のロックの前に親のロックを取得するので，\texttt{exit} も同じ順序を
+守らなくてはなりません．
+
+\texttt{exit} は特殊な起床用の関数である \texttt{wakeup1} を呼びます．こ
+れは，親だけを，かつ \texttt{wait} で待っているときに限り起床させるもの
+です \lineref{kernel/proc.c:/^wakeup1/}．子が，自身の状態を\texttt{ZOMBIE} にする前に
+親を起床させるのは誤りに見えますが，これは安全です．\texttt{wakeup1} は
+親を実行させる可能性がありますが，\texttt{wait} のループは，スケ
+ジューラが子の \texttt{p->lock} を解放するまで子を調べることができませ
+ん．よって，\texttt{wait} は，ずっとあとに \texttt{exit} がその状態
+を\texttt{ZOMBIE} にセットするまで，終了しつつある子プロセスを見ることが出来
+ません \lineref{kernel/proc.c:/state.=.ZOMBIE/}．
+
+\texttt{exit} がプロセス自ら停止するためにあるのに対
+し，\texttt{kill} 
+\lineref{kernel/proc.c:/^kill/} 
+は，あるプロセスが別のプロセスを
+停止させることができます．\texttt{kill} が被害者プロセスを直接壊すのは
+複雑すぎます．なぜなら，被害者プロセスは別の CPU で実行中かもしれず，カー
+ネルのデータ構造を更新する重要な処理の途中かもしれないからです．よっ
+て，\texttt{kill} はほとんど何もしません．\texttt{kill} は被害者
+の \indexcode{p->killed}をセットし，もしそれが眠っているならば起床させます．
+いずれ，その被害者がカーネルに入るか出るかする時点
+において，\texttt{p->killed} がセットされていれ
+ば \texttt{usertrap} が \texttt{exit} を呼び出します．もし被害者がユー
+ザ空間で実行中であれば，システムコールを呼ぶか，タイマ（もしくは他のデ
+バイスによる）割込により，近いうちにカーネルに入るはずです．
+
+被害者プロセスが眠っている場合，\texttt{kill} は \texttt{wakeup} を呼ん
+で被害者を起床させます．条件が満たされていないのに起床させることは潜在
+的に危険です．しかし，xv6 の \texttt{sleep} 呼び出しは常
+に \texttt{while} ループにくるまれていて，起床するとすぐに条件を再検証
+します．\texttt{sleep} の呼び出しの中には，ループ内
+で \texttt{p->killed} を検証し，もしセットされていれば現在の活動を放棄
+するものもあります．それは，そのような放棄が正しいときに限り行われます．
+たとえば，パイプの読み書きのコード
+\lineref{kernel/pipe.c:/myproc..-\>killed/} 
+は \texttt{killed} フラグがセットされているとリター
+ンします．そのコードはいずれトラップにもどり，フラグを再びチェックし
+て \texttt{exit} します．
+
+xv6 の \texttt{sleep} のループには， \texttt{p->killed} をチェックしな
+いものもあります．アトミックでなくてはならない複数ステップか
+らなるシステムコールの途中にいる場合です．virtio ドライバ
+\lineref{kernel/virtio\_disk.c:/sleep.b/} 
+がその例です．\texttt{p->killed}
+をチェックしないのは，そのディスク操作が，ファイルシステムを正しく保つ
+ために順番どおりに完遂しなくてはいけない書き込みの途中かもしれないか
+らです．ディスク I/O を待っているあいだに殺されたプロセスは，現在のシス
+テムコールが完了し，\texttt{usertrap} が \texttt{killed} フラグを見るま
+では終了しません．
+
+%% 
+\section{世の中のオペレーティングシステム}
+%% 
+
+xv6 のスケジューラは単純なスケジューリングポリシーを実装します．
+すなわち，全てのプロセスを順に実行するというものです．これは，
+\indextext{ラウンドロビン}と呼ばれるポリシーです．世の中のオペレーティングシステムは，より
+洗練されたポリシーを実装しており，たとえば，プロセス間に優先度を設定す
+ることができます．これはすなわち，スカジューラが，実行可能な高優先度の
+プロセスを，低優先度プロセスよりも優遇するということです．そのようなポ
+リシーはすぐに複雑になります．なぜなら，目標が相容れない場合があるから
+です．たとえば，そのオペレーティングシステムは，公平性や高スループット
+もまた保証したいと思うかもしれません．さらに，複雑なポリシーは，
+\indextext{優先度の逆転} (priority inversion) や，\indextext{コンボイ} (convoy) などの意図しない相互作用を生じることがあります．
+優先度の逆転は，高優先度と低優先度のプロセスがロックを共有しているときに起
+きます．低優先度のプロセスがロックをつかむと，高優先度のプロセスは処理
+を進めることができなくなってしまいます．たくさんの高優先度プロセスが，
+低優先度プロセスが取得したロックを待つと，待っているプロセスの長
+いコンボイができる可能性があります．一度コンボイができると，それは
+長いあいだ維持されます．そのような問題を避けるには，追加のメカニズムを
+備えた洗練されたスケジューラが必要です．
+
+\texttt{sleep} と \texttt{wakeup} は単純で効果的な同期方法ですが，別の
+方法もありえます．それらに共通する第一の課題は，この章の最初の方で見た
+起床の見逃し問題です．オリジナルの Unix カーネル
+の \texttt{sleep} は，単に割込を無効化していました．Unix は単一プロセッ
+サで実行していたのでそれで十分だったのです．xv6 はマルチプロセッサで動
+作するので，\texttt{sleep} に明示的なロックが必要で
+す．FreeBSD の \texttt{msleep} は同じアプローチをとります．Plan~9
+の\texttt{sleep} は，休眠する直前に，スケジューラのロックを持った状態で実行する
+コールバック関数を使うことができます．この関数は，\texttt{sleep} する最後の瞬間に，
+スリープ条件をチェックする役目があり，それにより \texttt{wakeup} の見逃
+しを防ぎます．Linux カーネルの \texttt{sleep} は，ウェイトチャネルのか
+わりに，ウェイトキューと呼ばれる明示的なプロセスキューを使います．その
+キューには，内部的なロックがあります．
+
+\texttt{wakeup} がプロセスリスト全体を調べて \texttt{chan} が一致するか
+確かめるのは非効率的です．より良い方法は
+\texttt{sleep} と \texttt{wakeup} で使う \texttt{chan} を構造体に置き換
+え，そこに待っているプロセスのリストを入れておくことです．Linux のウェ
+イトキューがその例です．Plan 9 の \texttt{sleep} と \texttt{wakeup} は
+その構造体のことをランデブーポイントもしくは \texttt{Rendez} と呼びます．
+多くのスレッドは，その構造体のことを条件変数と呼びます．この文脈におい
+て，\texttt{sleep} と \texttt{wakeup} は，それぞ
+れ \texttt{wait} と \texttt{signal} と呼ばれます．それらのメカニズムは
+いずれも似た雰囲気を持ちます．スリープする条件はある種のロックによって
+守られており，スリープ時にそのロックは自動で解放されます．
+
+\texttt{wakeup} の実装は，特定のチャネルで待つプロセスを全て起床させていました．
+また，たくさんのプロセスが特定のチャネルを待つことがありました．
+オペレーティングシステムがそれらのプロセスのスケジュールを行い，それらは
+競ってスリープ条件をチェックします．プロセスのこのような振る舞いは，
+\indextext{thundering herd} と呼ばれることがあり，避けた方がよいものです．
+多くの条件変数は \texttt{wakeup} のために 2 つのプリミティブを持ちます．
+1つのプロセスだけを起床させる \texttt{signal} と，待っているプロセス全てを
+起床させる \texttt{broadcast} です．
+
+同期化のためにセマフォが使われることもあります．セマフォのカウントの値は，通常，
+パイプバッファ内のバイト数や，そのプロセスが持つゾンビの子プロセス数な
+どとして利用します．抽象化において明示的なカウントを導入すると，
+起床の見逃し問題を防ぐことができます．発生し
+た \texttt{wakeup} の数を明示的にカウントするのです．このカウントは，偽
+の起床や thundering herd 問題を避けるのにも役立ちます．
+
+プロセスを終了してそれを掃除することは xv6 をだいぶ複雑にしています．
+多くのオペレーティングシステムにおいて，それはさらに複雑です．なぜなら，
+たとえば，被害者プロセスが眠っているカーネルの奥深くにいるかもしれず，
+そのカーネルスタックの巻き戻すには慎重なプログラミングが必要です．多く
+のオペレーティングシステムでは，スタックの巻き戻しを，割込ハンドリング
+における明示的なメカニズムとして用いています．たとえ
+ば \texttt{longjmp} です．また，待っているイベントがまだ生じていないの
+にも関わらず，眠っているプロセス起床させうるイベントがあります．たとえ
+ば，ある Unix プロセスが眠っているとき，別プロセスが \indexcode{signal} を送
+ってくる可能性があります．その場合，そのプロセスは割り込まれたシステムコール
+から返値 -1 でリターンし，エラーコードを \texttt{EINTR} にセットしま
+す．アプリケーションは，これらの値をチェックしてどうするか決めることができます．
+xv6 はシグナルをサポートしないので，その複雑さが問題になることはありません．
+
+xv6 による \texttt{kill} のサポートは不完全です．スリープのルー
+プで，\texttt{p->killed} をチェックしなくてはいけないかもしれないものが
+あります．関連する問題は，\texttt{p->killed} をチェックするスリープのルー
+プであっても，\texttt{sleep} と \texttt{kill} のあいだで競合があること
+です．被害者のループが \texttt{p->killed} をチェックした
+が \texttt{sleep} を呼ぶ前のタイミング
+で，\texttt{kill} が \texttt{p->killed} をセットして被害者を起床させ
+る可能性があります．この問題が起きると，待っている条件が発生するまで，
+被害者は\texttt{p->killed} に気づきません．これは，かなりあとになったり
+（例: 被害者の待っていたディスクブロックを，\texttt{virtio} ドライバが
+返したとき），場合によっては永久に来ません（被害者がコンソール入力を待っ
+ているが，ユーザが何も入力しない場合）．
+
+現実世界のオペレーティングシステムでは，利用可能な \texttt{proc} 構造体を取得するとき，
+\texttt{allocproc} を線形に探索するかわりに，自由リストを用いて定数時間で
+見つけるという方法を使うことがあります．xv6 は，単純さのために線形探索を用いています．
+
+
+%% 
+\section{練習問題}
+%% 
+
+\begin{enumerate}
+  
+\item \texttt{sleep} は，デッドロックを避けるために 
+\texttt{lk != \&p->lock} のチェックをする必要があります
+\linerefs{kernel/proc.c:/DOC: sleeplock0/,/^..}/}．
+このコード
+%
+\begin{lstlisting}[]
+if(lk != &p->lock){
+  acquire(&p->lock);
+  release(lk);
+}
+\end{lstlisting}
+を，次のコードに置き換えることで特殊ケースを消してしまったとします:
+\begin{lstlisting}[]
+release(lk);
+acquire(&p->lock);
+\end{lstlisting}
+%
+こうすると \texttt{sleep} は壊れてしまうのですが，
+どう壊れるでしょうか？
+
+\item ほとんどのプロセスのクリーンアップは，\texttt{exit} もしく
+  は \texttt{wait} のいずれかで行われます．結果として，開いているファイ
+  ルは \texttt{exit} が閉じなくてはならないのですが，それはなぜでしょう
+  か？回答には，パイプが関連しています．
+
+% Answer: self-deadlock. wait() holds p->lock, but the wakeup()
+% in pipeclose() tries to acquire every process's lock.
+
+\item xv6 にセマフォを実装してください．ただ
+  し，\texttt{sleep} と \texttt{wakeup} は使わないでください（スピンロッ
+  クは使っても構いません）．続い
+  て，xv6の \texttt{sleep} と \texttt{wakeup} をセマフォに置き換えてく
+  ださい．この結果の良し悪しを判断してください．
+
+\item 上記の \texttt{kill} と \texttt{sleep} の競合を解決してください．
+  すなわち，被害者のスリープループが \texttt{p->killed} をチェックした
+  あとでかつ\texttt{sleep} を呼ぶ前に \texttt{kill} が呼ばれたら，被害
+  者が現在のシステムコールを廃棄するようにしてください．
+
+% Answer: a solution is to to check in sleep if p->killed is set before setting
+% the processes's state to sleep. 
+
+\item スリープループが毎回 \texttt{p->killed} をチェックするような計画
+  を設計してください．そうすることで，たとえば，\texttt{virtio} ドラ
+  イバにいるプロセスが他のプロセスから \texttt{kill} されたら，即座
+  に例の while ループからリターンできるようにしてください．
+
+\item あるプロセスのカーネルスレッドから別へ切り替わるときに，スケジュー
+  ルスレッドを経由するのではなく，コンテキストスイッチ1回で済むよう
+  に xv6 を改造してください．CPU を手放そうとしているスレッドが自ら次のス
+  レッドを選び，\texttt{swtch} を呼ぶことになるでしょう．複数のコアが間
+  違って同じスレッドを実行するのを防ぐところが難しいはずです．すなわち，
+  正しくロックをしてデッドロックを回避するところが難しいはずです．
+
+\item xv6 の \texttt{scheduler} を改造して，実行可能なプロセスが無いと
+  きはRISC-V の \texttt{WFI} (wait for interrupt) 命令を使うようにして
+  ください．実行可能プロセスが待っているときは，\texttt{WFI} で停止する
+  コアが無いことを保証してみてください．
+
+\item \texttt{p->lock} は多くの不変量を保護しているた
+  め，xv6 の \texttt{p->lock} で保護されたある特定のコードを見ただけで
+  は，どの不変量が保たれているのか判断が難しいことがありま
+  す．\texttt{p->lock} を複数のロックに分割することで，よりきれいな計画
+  を設計してください．
+
+\end{enumerate}

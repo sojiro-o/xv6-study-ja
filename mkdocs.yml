@@ -38,5 +38,8 @@ hooks:
 nav:
   - トップ: index.md
   - 環境ガイド: env.md
+  - 教科書との対応・差分:
+      - 教科書との対応表: books-map.md
+      - "第4章 和訳とコードの差分メモ": books/trap-diff.md
   - 教材:
-      - "第1章 アプリからOSに処理を頼む：システムコール": ch01-syscall.md
+      - "第4章 トラップとシステムコール（1）アプリからOSに処理を頼む": ch04-syscall.md

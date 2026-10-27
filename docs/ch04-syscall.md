@@ -1,6 +1,7 @@
-# 第1章 アプリからOSに処理を頼む：システムコール
+# 第4章 トラップとシステムコール（1）アプリからOSに処理を頼む
 
-> **対象コード**: `mit-pdos/xv6-riscv` コミット [`e93dabeb98431235c6e1a101cb96c73c923fdbc4`](https://github.com/mit-pdos/xv6-riscv/tree/e93dabeb98431235c6e1a101cb96c73c923fdbc4)（リポジトリ直下の `VERSIONS.md` と同一）
+> - **対象コード**: `mit-pdos/xv6-riscv` コミット [`e93dabeb98431235c6e1a101cb96c73c923fdbc4`](https://github.com/mit-pdos/xv6-riscv/tree/e93dabeb98431235c6e1a101cb96c73c923fdbc4)（リポジトリ直下の `VERSIONS.md` と同一）
+> - **対応する教科書**: MIT 教科書 **第4章 4.1〜4.4節**（*Traps and system calls*） ／ 菅原訳 **第4章 4.1節・4.3節・4.5節・4.6節**（「トラップとデバイスドライバ」）に対応（全体の対応は [教科書との対応表](books-map.md)、和訳とのコード差分は [第4章の差分メモ](books/trap-diff.md) を参照）
 
 C 言語で画面に文字を出すとき、`printf` や `write` を呼び出します。ところが、アプリ自身のコードには「画面の装置に電気信号を送る処理」はどこにも書かれていません。実は、アプリは途中で OS（カーネル）にバトンを渡し、代わりに仕事をしてもらっています。
 
@@ -425,3 +426,28 @@ RISC-V の `sd`（メモリ保存）命令は、「ベースとなる番地が�
 `sys_exit` は内部で `kexit` → `sched` と進んでプロセスを終了させてしまうため、`syscalls[num]()` の後ろに書いた処理へは絶対に戻ってきません。そのため、`exit` を記録したい場合は `syscalls[num]()` を呼ぶ前に表示する必要があります。ただし、呼び出す前の時点ではまだシステムコールの戻り値は決まっていない（そもそも `exit` には戻り値がない）ため、`exit` については戻り値を表示しないか、`p->trapframe->a0` に入っている終了ステータス（`exit(0)` なら `0`）を表示するといった形になります。
 
 </details>
+
+---
+
+## 9. 教科書と並べて読むときの注意
+
+電気通信大学・菅原研究室による日本語訳（第4章「トラップとデバイスドライバ」）は 2019 年 10 月時点の英語原文をもとに翻訳されているため、このリポジトリの `xv6-riscv/`（2026 年 10 月時点）や最新の MIT 英語原文（第4章 *Traps and system calls*）とは、章の構成や関数名・実装がいくつか変わっています。和訳を手元に置いて読むときは、とくに次の点に注意してください。
+
+- **章構成と節の順序が変わっている**  
+  和訳の第4章に含まれていた「4.4 タイマ割込」と「4.7〜4.8 デバイスドライバ・コンソールドライバ」は、最新の英語原文では **第6章（*Interrupts and device drivers*）** へ分離されました。また、和訳では「4.2 カーネル空間からのトラップ → 4.3 ユーザ空間からのトラップ」の順でしたが、最新版では逆になり「4.2 ユーザ空間 → 4.5 カーネル空間」の順で説明されています。
+- **`usertrapret()` が廃止され、`prepare_return()` ＋ `return satp` に変わった**  
+  和訳（4.3節）では `usertrap()` の最後で `usertrapret()` を呼び、そこからトランポリンの `userret(satp, TRAPFRAME)` を関数呼び出ししていました。現在のコードには `usertrapret` という関数はなく、`prepare_return()` で復帰準備をしたあと、`usertrap()` がユーザー用ページテーブルの `satp` 値を `return satp;` で返して `trampoline.S` の `userret` へ直接戻る形になっています（最新の英語原文 4.2節も同様です）。
+- **`sscratch` の使い方が「交換（`csrrw`）」から「退避（`csrw`）＋定数ロード（`li`）」に変わった**  
+  和訳（4.3節）では、あらかじめ `sscratch` に `TRAPFRAME` を入れておき、`csrrw` 命令で `a0` と交換する仕組みでした。現在のコード（および最新原文 4.2節）では、`csrw sscratch, a0` で `a0` を退避したあと `li a0, TRAPFRAME` で定数番地を直接入れ、帰り道の `userret` では `sscratch` を使いません。
+- **構造体メンバ名が `p->tf` から `p->trapframe` に変わった**  
+  和訳で `p->tf`（`p->tf->a0` など）と書かれている箇所は、現在のコード（`kernel/proc.h`）および最新原文ではすべて `p->trapframe` です。
+- **`user/initcode.S` が廃止された**  
+  和訳（4.5節・2.6節）では、最初のプロセスが `user/initcode.S` から `exec` システムコールを呼ぶ例で説明されていますが、現在の `xv6-riscv/` に `user/initcode.S` は存在しません。最初のプロセスは `kernel/proc.c` の `forkret()` から直接カーネル関数 `kexec("/init", ...)` を呼び出して起動します。そのため最新原文 4.3節では、シェルの `write(2, "$ ", 2)` と `user/usys.S` のスタブを例に説明しています。
+- **カーネル内の関数名がユーザー側と区別できるよう改名された**  
+  - カーネル内のコンソール出力：`printf`（`kernel/printf.c`）→ **`printk`**（`kernel/printk.c`）
+  - システムコール本体の内部関数：`exec` → **`kexec`**、`kill` → **`kkill`**、`fork` → **`kfork`**、`exit` → **`kexit`**、`wait` → **`kwait`**
+  - 一時停止システムコール：`sleep`（`SYS_sleep`）→ **`pause`**（`SYS_pause` / `sys_pause`）
+- **`sbrk` とページフォルトの扱いが変わった**  
+  現在の `xv6-riscv/` では遅延割り当て（lazy allocation）に対応したため、`user/usys.pl` は `sbrk` だけ `sys_sbrk` スタブを生成し、`sys_sbrk` は第2引数（`SBRK_EAGER` / `SBRK_LAZY`）を受け取ります。これに伴い、`usertrap()` や `copyin()` / `copyinstr()`（第2引数に `p->sz` が追加）でも、未割り当てページへのアクセス時に `vmfault()` を呼ぶ処理が増えています（最新原文では新設の**第5章 *Page faults*** で扱われます）。
+
+各変更点の詳しい対照表や、和訳第4章に含まれるタイマ割込（`timervec` 廃止 → `stimecmp` / `clockintr`）・コンソールドライバまわりの変更、`\lineref` の対応一覧は **[第4章 和訳とコードの差分メモ](books/trap-diff.md)** にまとめています。章全体の対応は **[教科書との対応表](books-map.md)** を参照してください。
