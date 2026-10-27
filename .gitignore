@@ -12,7 +12,7 @@
 /xv6-riscv/TAGS
 /xv6-riscv/test-xv6.out
 
-# 実行ログ・サイト生成物・ローカル仮想環境は作業ツリーに残し、Git 管理外とする。
+# 実行ログ・サイト生成物・ローカル仮想環境・SVG目視確認用PNGは作業ツリーに残し、Git 管理外とする。
 /logs/
 /site/
 /.venv/
