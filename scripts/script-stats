@@ -208,6 +208,42 @@ def check_dictionary(sections: list[SectionStats], dict_path: Path) -> tuple[set
     return used_tokens, missing, dict_warnings
 
 
+def resolve_default_bounds(script_path: Path, meta: dict[str, str]) -> tuple[int, int, int | None]:
+    min_c, max_c = 2600, 3800
+    max_line: int | None = None
+
+    # Detect 20-min series scripts under video/series/ as default 6000-6600 / 60 chars
+    try:
+        rel = script_path.resolve().relative_to((REPO_ROOT / "video" / "series").resolve())
+        if rel:
+            min_c, max_c = 6000, 6600
+            max_line = 60
+    except ValueError:
+        pass
+
+    if "target_chars" in meta:
+        m = re.fullmatch(r"(\d+)\s*[-〜~]\s*(\d+)", meta["target_chars"].replace(",", ""))
+        if m:
+            min_c, max_c = int(m.group(1)), int(m.group(2))
+
+    if "max_line_chars" in meta and meta["max_line_chars"].isdigit():
+        max_line = int(meta["max_line_chars"])
+
+    return min_c, max_c, max_line
+
+
+def resolve_dict_path(script_path: Path, explicit_dict: str | None) -> Path | None:
+    if explicit_dict:
+        return Path(explicit_dict)
+    local_dict = script_path.parent / "dictionary.csv"
+    if local_dict.is_file():
+        return local_dict
+    parent_dict = script_path.parent.parent / "dictionary.csv"
+    if parent_dict.is_file():
+        return parent_dict
+    return local_dict
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="scripts/script-stats",
@@ -223,12 +259,30 @@ def main() -> int:
         "--dict",
         dest="dict_path",
         default=None,
-        help="照合する dictionary.csv パス（省略時は script と同じディレクトリの dictionary.csv）",
+        help="照合する dictionary.csv パス（省略時は同ディレクトリまたは親ディレクトリの dictionary.csv）",
+    )
+    parser.add_argument(
+        "--min-chars",
+        type=int,
+        default=None,
+        help="目標文字数の下限（省略時は通常 2600、video/series/ 配下は 6000）",
+    )
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=None,
+        help="目標文字数の上限（省略時は通常 3800、video/series/ 配下は 6600）",
+    )
+    parser.add_argument(
+        "--max-line-chars",
+        type=int,
+        default=None,
+        help="1文あたりの最大文字数上限（省略時は video/series/ 配下で 60、他は制限なし）",
     )
     parser.add_argument(
         "--check",
         action="store_true",
-        help="文字数範囲（2,600〜3,800字）・1行1文・画面依存表現・辞書未登録を厳格検証し、違反時に終了コード1を返します。",
+        help="文字数範囲・1文長上限・1行1文・画面依存表現・辞書未登録を厳格検証し、違反時に終了コード1を返します。",
     )
     args = parser.parse_args()
 
@@ -242,6 +296,11 @@ def main() -> int:
     if not all_lines:
         print(f"[FAIL] 発話行が1行も見つかりません: {script_path}", file=sys.stderr)
         return 1
+
+    def_min, def_max, def_max_line = resolve_default_bounds(script_path, meta)
+    min_chars = args.min_chars if args.min_chars is not None else def_min
+    max_chars = args.max_chars if args.max_chars is not None else def_max
+    max_line_chars = args.max_line_chars if args.max_line_chars is not None else def_max_line
 
     total_chars = sum(len(re.sub(r"\s+", "", ln.spoken)) for ln in all_lines)
     plain_chars = sum(len(PUNCT_RE.sub("", ln.spoken)) for ln in all_lines)
@@ -264,10 +323,15 @@ def main() -> int:
             + (f" / 他 {cues.other}" if cues.other else "")
             + f"・指定秒数計 {cues.extra_sec:g}秒）"
         )
-    print(f"本文文字数   : {total_chars:,} 字（空白除く・句読点込み） / {plain_chars:,} 字（句読点・括弧除く）")
+    print(
+        f"本文文字数   : {total_chars:,} 字（空白除く・句読点込み、目標 {min_chars:,}〜{max_chars:,} 字）"
+        f" / {plain_chars:,} 字（句読点・括弧除く）"
+    )
     print(
         f"1文あたり長  : 平均 {total_chars / len(all_lines):.1f} 字 "
-        f"（最短 {min(lengths)} 字 / 最長 {max(lengths)} 字）"
+        f"（最短 {min(lengths)} 字 / 最長 {max(lengths)} 字"
+        + (f" / 上限 {max_line_chars} 字" if max_line_chars is not None else "")
+        + "）"
     )
     print(
         "推定尺（発話）: "
@@ -277,7 +341,7 @@ def main() -> int:
     )
     if cues.extra_sec > 0:
         print(
-            f"推定尺（演出込）: "
+            "推定尺（演出込）: "
             f"300字/分 = {fmt_mmss(total_chars, 300, cues.extra_sec)} | "
             f"315字/分 = {fmt_mmss(total_chars, 315, cues.extra_sec)} | "
             f"330字/分 = {fmt_mmss(total_chars, 330, cues.extra_sec)}"
@@ -288,20 +352,27 @@ def main() -> int:
         c = sec.chars
         print(f"  {sec.title}: {len(sec.lines):2d} 文 / {c:4d} 字 / 約 {fmt_mmss(c, 315)}")
 
-    dict_path = Path(args.dict_path) if args.dict_path else script_path.parent / "dictionary.csv"
+    dict_path = resolve_dict_path(script_path, args.dict_path)
     missing_tokens: set[str] = set()
-    if dict_path.is_file():
+    if dict_path and dict_path.is_file():
         used_tokens, missing_tokens, dict_warnings = check_dictionary(sections, dict_path)
         warnings.extend(dict_warnings)
+        rel_dict = (
+            dict_path.resolve().relative_to(REPO_ROOT.resolve())
+            if dict_path.resolve().is_relative_to(REPO_ROOT.resolve())
+            else dict_path
+        )
         print()
         if missing_tokens:
             print(
-                f"--- 辞書照合 ({dict_path.name}): 未登録トークンあり {sorted(missing_tokens)} ---"
+                f"--- 辞書照合 ({rel_dict}): 未登録トークンあり {sorted(missing_tokens)} ---"
             )
         else:
             print(
-                f"--- 辞書照合 ({dict_path.name}): OK（本文中の英字トークン {len(used_tokens)} 種すべて登録済み） ---"
+                f"--- 辞書照合 ({rel_dict}): OK（本文中の英字トークン {len(used_tokens)} 種すべて登録済み） ---"
             )
+    else:
+        warnings.append(f"読み方辞書が見つかりません: {dict_path}")
 
     full_text = script_path.read_text(encoding="utf-8")
 
@@ -334,8 +405,18 @@ def main() -> int:
                 f"番組名 '{prog_name}' の本文出現回数が {spoken_prog_count} 回です（差し替えやすいよう最小限・3回以内にしてください）。"
             )
 
-    if not (2600 <= total_chars <= 3800):
-        warnings.append(f"本文文字数 {total_chars} 字が目標範囲（2,600〜3,800字）の外にあります。")
+    if max_line_chars is not None:
+        for ln in all_lines:
+            slen = len(re.sub(r"\s+", "", ln.spoken))
+            if slen > max_line_chars:
+                warnings.append(
+                    f"{ln.lineno}行目: 1文が {slen} 字あり上限（{max_line_chars}字）を超えています: {ln.spoken}"
+                )
+
+    if not (min_chars <= total_chars <= max_chars):
+        warnings.append(
+            f"本文文字数 {total_chars:,} 字が目標範囲（{min_chars:,}〜{max_chars:,}字）の外にあります。"
+        )
 
     if warnings:
         print()

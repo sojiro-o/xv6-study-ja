@@ -127,3 +127,19 @@
   - `video/ep01/script.md`（既存比較用）: **PASS**（6セクション・85文・3,594字で引き続き通過）
 - **「耳だけで聞く初学者」通読で修正した点**:
   - 初出の「カーネル」「プロセス」「シェル」にその場で短い言い換えを添え、「関数ポインタ」の専門用語や復帰時の `a0` レジスタ用途（`usertrap` の地図返却と退避シートからの戻り値復元）の混同リスクを平易な表現に改め、60字超だった実験案内文を2文に分割（全87文を55字以内に統一）。
+
+---
+
+## 7. 20分シリーズ構成表（全27回）・第1回試作台本作成フェーズ
+
+- **作成・更新ファイル**:
+  - **新規作成**:
+    - `video/series-plan.md` — `books/mit-en/book.tex` 全14ファイル（序文＋第1〜13章・全102ブロック、計8,313行・302,299字）を1本約20分（6,000〜6,600字）の**全27回**に割り振ったシリーズ構成表（各節の行数・字数実測表、和訳対応、現行 `xv6-riscv/` 実在確認済みコード、手元実験案、和訳とのズレ、前提回を記載。旧 `video/ep01` は第9回で再構成）
+    - `video/series/ep01/script.md` — シリーズ第1回試作台本（序文＋第1章導入・1.1節、7コーナー構成、架空お便り注記付き）
+    - `video/series/dictionary.csv` — シリーズ共通の英字読み方辞書（75語）
+    - `video/series/ep01/factcheck.md` — 第1回台本の技術的主張21項目と `books/mit-en/`・`books/sugawara-ja/`・`xv6-riscv/` の根拠対照表
+  - **更新**: `scripts/script-stats` — `--min-chars` / `--max-chars` / `--max-line-chars` オプション、メタ情報（`target_chars` / `max_line_chars`）および `video/series/` 既定値（6,000〜6,600字・1文60字上限）、親ディレクトリの共通 `dictionary.csv` 探索に対応（既存 `video/ep01/` 台本の互換維持）
+- **検証結果**:
+  - `./scripts/script-stats --check video/series/ep01/script.md`: **PASS**（7コーナー・159文、本文 6,393字、1文最長 55字、315字/分換算で発話 20分18秒・演出込 20分41秒、英字38種すべて登録済み）
+  - 既存 `video/ep01/script.md`・`video/ep01/script-radio.md` の `--check`、QEMU 実機での第1回実験手順（入れ子 `sh` → `Ctrl-P` → `Ctrl-D`）確認、`./scripts/clean` によるビルド成果物除去、`xv6-riscv/`・`books/` 無変更確認: **PASS**
+
