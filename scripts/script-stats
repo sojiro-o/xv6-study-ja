@@ -16,6 +16,8 @@ DEFAULT_SCRIPT = REPO_ROOT / "video" / "ep01" / "script.md"
 VISUAL_CUE_RE = re.compile(r"\s*\[画面:\s*([^\]]+)\]\s*$")
 ASCII_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 PUNCT_RE = re.compile(r"[、。！？!?「」『』（）()・…―〜\s]")
+COMMENT_CUE_RE = re.compile(r"^<!--\s*(SE|BGM|間)\s*:\s*(.*?)\s*-->$")
+PAUSE_SEC_RE = re.compile(r"(\d+(?:\.\d+)?)\s*秒")
 
 FORBIDDEN_AUDIO_PHRASES = (
     "この図",
@@ -52,16 +54,35 @@ class SectionStats:
         return sum(len( re.sub(r"\s+", "", ln.spoken) ) for ln in self.lines)
 
 
-def fmt_mmss(chars: int, cpm: float) -> str:
-    total_sec = round((chars / cpm) * 60)
+def fmt_mmss(chars: int, cpm: float, extra_sec: float = 0.0) -> str:
+    total_sec = round((chars / cpm) * 60 + extra_sec)
     mm, ss = divmod(total_sec, 60)
     return f"{mm}分{ss:02d}秒"
 
 
-def parse_script(path: Path) -> tuple[dict[str, str], list[SectionStats], list[str]]:
+@dataclass
+class CueStats:
+    se: int = 0
+    bgm: int = 0
+    pause: int = 0
+    other: int = 0
+    pause_sec: float = 0.0
+    jingle_sec: float = 0.0
+
+    @property
+    def total(self) -> int:
+        return self.se + self.bgm + self.pause + self.other
+
+    @property
+    def extra_sec(self) -> float:
+        return self.pause_sec + self.jingle_sec
+
+
+def parse_script(path: Path) -> tuple[dict[str, str], list[SectionStats], CueStats, list[str]]:
     raw_lines = path.read_text(encoding="utf-8").splitlines()
     meta: dict[str, str] = {}
     sections: list[SectionStats] = []
+    cues = CueStats()
     warnings: list[str] = []
 
     idx = 0
@@ -93,6 +114,22 @@ def parse_script(path: Path) -> tuple[dict[str, str], list[SectionStats], list[s
         if stripped.startswith("<!--"):
             if "-->" not in stripped:
                 in_comment = True
+            else:
+                cm = COMMENT_CUE_RE.match(stripped)
+                if cm:
+                    kind, body = cm.group(1), cm.group(2)
+                    sm = PAUSE_SEC_RE.search(body)
+                    sec_val = float(sm.group(1)) if sm else 0.0
+                    if kind == "SE":
+                        cues.se += 1
+                        cues.jingle_sec += sec_val
+                    elif kind == "BGM":
+                        cues.bgm += 1
+                    elif kind == "間":
+                        cues.pause += 1
+                        cues.pause_sec += sec_val
+                else:
+                    cues.other += 1
             continue
         if not stripped or stripped.startswith(">"):
             continue
@@ -113,11 +150,14 @@ def parse_script(path: Path) -> tuple[dict[str, str], list[SectionStats], list[s
             visual = None
             spoken = stripped
 
+        if "<!--" in spoken or "-->" in spoken:
+            warnings.append(f"{lineno}行目: 発話行内にコメント記法が含まれています（独立行にしてください）: {spoken}")
+
         if "[" in spoken or "]" in spoken:
             warnings.append(f"{lineno}行目: 発話本文に角括弧が残っています: {spoken}")
 
-        # Check 1-line = 1-sentence rule (outside 「...」 quotes)
-        unquoted = re.sub(r"「[^」]*」", "", spoken)
+        # Check 1-line = 1-sentence rule (outside 「...」 / 『...』 quotes)
+        unquoted = re.sub(r"「[^」]*」|『[^』]*』", "", spoken)
         sent_endings = re.findall(r"[。！？!?]", unquoted[:-1] if unquoted else "")
         if sent_endings:
             warnings.append(f"{lineno}行目: 1行に複数の文末記号が含まれています: {spoken}")
@@ -128,10 +168,13 @@ def parse_script(path: Path) -> tuple[dict[str, str], list[SectionStats], list[s
 
         current_section.lines.append(SpokenLine(lineno=lineno, spoken=spoken, visual=visual))
 
+    if in_comment:
+        warnings.append("閉じられていない HTML コメント '<!--' があります。")
+
     if current_section.lines:
         sections.append(current_section)
 
-    return meta, sections, warnings
+    return meta, sections, cues, warnings
 
 
 def check_dictionary(sections: list[SectionStats], dict_path: Path) -> tuple[set[str], set[str], list[str]]:
@@ -194,7 +237,7 @@ def main() -> int:
         print(f"[FAIL] 台本ファイルが見つかりません: {script_path}", file=sys.stderr)
         return 1
 
-    meta, sections, warnings = parse_script(script_path)
+    meta, sections, cues, warnings = parse_script(script_path)
     all_lines = [ln for sec in sections for ln in sec.lines]
     if not all_lines:
         print(f"[FAIL] 発話行が1行も見つかりません: {script_path}", file=sys.stderr)
@@ -207,23 +250,38 @@ def main() -> int:
 
     print(f"=== 台本統計: {script_path} ===")
     if meta:
+        if "program" in meta:
+            print(f"番組名       : {meta['program']}")
         print(f"タイトル     : {meta.get('title', '(未設定)')}")
         print(f"話者名（仮） : {meta.get('character', '(未設定)')}")
         print(f"対象コミット : {meta.get('target_commit', '(未設定)')}")
         print(f"参照章       : {meta.get('reference_chapter', '(未設定)')}")
     print(f"セクション数 : {len(sections)}")
     print(f"文数（字幕数）: {len(all_lines)} 文（うち画面指示付き {visual_count} 文）")
+    if cues.total > 0:
+        print(
+            f"演出コメント : {cues.total} 行（SE {cues.se} / BGM {cues.bgm} / 間 {cues.pause}"
+            + (f" / 他 {cues.other}" if cues.other else "")
+            + f"・指定秒数計 {cues.extra_sec:g}秒）"
+        )
     print(f"本文文字数   : {total_chars:,} 字（空白除く・句読点込み） / {plain_chars:,} 字（句読点・括弧除く）")
     print(
         f"1文あたり長  : 平均 {total_chars / len(all_lines):.1f} 字 "
         f"（最短 {min(lengths)} 字 / 最長 {max(lengths)} 字）"
     )
     print(
-        "推定尺       : "
+        "推定尺（発話）: "
         f"300字/分 = {fmt_mmss(total_chars, 300)} | "
         f"315字/分 = {fmt_mmss(total_chars, 315)} | "
         f"330字/分 = {fmt_mmss(total_chars, 330)}"
     )
+    if cues.extra_sec > 0:
+        print(
+            f"推定尺（演出込）: "
+            f"300字/分 = {fmt_mmss(total_chars, 300, cues.extra_sec)} | "
+            f"315字/分 = {fmt_mmss(total_chars, 315, cues.extra_sec)} | "
+            f"330字/分 = {fmt_mmss(total_chars, 330, cues.extra_sec)}"
+        )
     print()
     print("--- セクション別内訳（目安尺は 315 字/分換算） ---")
     for sec in sections:
@@ -245,14 +303,35 @@ def main() -> int:
                 f"--- 辞書照合 ({dict_path.name}): OK（本文中の英字トークン {len(used_tokens)} 種すべて登録済み） ---"
             )
 
+    full_text = script_path.read_text(encoding="utf-8")
+
     # Check character name count if defined in metadata
     char_name = meta.get("character", "")
     if char_name:
-        full_text = script_path.read_text(encoding="utf-8")
-        occurrences = full_text.count(char_name)
-        if occurrences != 1:
+        spoken_char_count = sum(ln.spoken.count(char_name) for ln in all_lines)
+        total_char_count = full_text.count(char_name)
+        non_spoken_extra = total_char_count - 1 - spoken_char_count
+        if non_spoken_extra != 0:
             warnings.append(
-                f"話者名 '{char_name}' の出現回数が {occurrences} 回です（メタ情報の1か所のみが推奨）。"
+                f"話者名 '{char_name}' がメタ情報と発話本文以外の箇所（見出し・注記・画面指示など）に含まれています。"
+            )
+        if spoken_char_count > 2:
+            warnings.append(
+                f"話者名 '{char_name}' の本文出現回数が {spoken_char_count} 回です（差し替えやすいよう最小限・2回以内にしてください）。"
+            )
+
+    prog_name = meta.get("program", "")
+    if prog_name:
+        spoken_prog_count = sum(ln.spoken.count(prog_name) for ln in all_lines)
+        total_prog_count = full_text.count(prog_name)
+        non_spoken_prog_extra = total_prog_count - 1 - spoken_prog_count
+        if non_spoken_prog_extra != 0:
+            warnings.append(
+                f"番組名 '{prog_name}' がメタ情報と発話本文以外の箇所（見出し・注記・画面指示など）に含まれています。"
+            )
+        if spoken_prog_count > 3:
+            warnings.append(
+                f"番組名 '{prog_name}' の本文出現回数が {spoken_prog_count} 回です（差し替えやすいよう最小限・3回以内にしてください）。"
             )
 
     if not (2600 <= total_chars <= 3800):
