@@ -9,7 +9,7 @@ MIT PDOS の教育用 OS である RISC-V 版 [xv6 (`xv6-riscv`)](https://github
 - `mkdocs.yml`, `.github/workflows/pages.yml` — MkDocs（Material）設定と GitHub Pages ビルド定義
 - `.devcontainer/` — GitHub Codespaces / VS Code Dev Containers 設定（Ubuntu 26.04 ベース、QEMU・RISC-V ツールチェーン・GDB・MkDocs・Gemini CLI 入り、Docker ビルドは未検証）
 - `scripts/` — 操作・検証用ラッパー（`run`, `clean`, `debug`, `test`, `exp`, `check-refs`, `check-lab`）
-- `GEMINI.md`, `AGENTS.md` — 学習サポート用 AI エージェント指示書
+- `AGENTS.md`, `GEMINI.md`, `CLAUDE.md` — 学習サポート用 AI エージェント指示書
 - `VERSIONS.md` — 取り込んだ xv6 のコミット ID と検証済みツールのバージョン
 - `NOTES.md` — 環境構築・教材検証結果の記録と未確認事項
 
@@ -33,6 +33,22 @@ MIT PDOS の教育用 OS である RISC-V 版 [xv6 (`xv6-riscv`)](https://github
    - GDB デバッグ: `./scripts/debug` と別端末で `./scripts/debug connect`
    - 実験ブランチ作成: `./scripts/exp <名前>`（元に戻るには `./scripts/exp back`）
    - 詳しい手順は [docs/env.md](docs/env.md) を参照してください。
+
+## エージェントと一緒に学ぶ
+
+リポジトリのルートでエージェントを起動すると、`AGENTS.md`（Gemini CLI は `GEMINI.md`、Claude Code は `CLAUDE.md` 経由）を読み、最初に学習モードを聞いてきます。
+
+- **解説のみ**: コードや概念を説明するだけ。ファイルは書き換えない。
+- **ヒント**: 手がかりだけ出す。ファイルは書き換えない。
+- **実装込み**: `./scripts/exp <名前>` で切った実験ブランチで書き換え、ビルド・実行して、理由・差分・結果を説明する。
+
+頼み方の例:
+
+- 「解説のみで。`kernel/syscall.c` の `syscall` が何をしているか、第1章に沿って教えて」
+- 「ヒントで。`exit` もトレースに出すにはどうすればいい？」
+- 「実装込みで。`getppid` システムコールを追加して、動くところまで見せて」
+
+教材は `mkdocs serve` を実行してブラウザで <http://localhost:8000> を開くと、手元で読めます（公開版: <https://sojiro-o.github.io/xv6-study-ja/>）。
 
 ## ライセンス
 
